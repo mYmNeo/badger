@@ -1,3 +1,4 @@
+//go:build !windows && !darwin && !plan9
 // +build !windows,!darwin,!plan9
 
 /*
@@ -31,7 +32,7 @@ func mmap(fd *os.File, writable bool, size int64) ([]byte, error) {
 	if writable {
 		mtype |= unix.PROT_WRITE
 	}
-	return unix.Mmap(int(fd.Fd()), 0, int(size), mtype, unix.MAP_SHARED)
+	return unix.Mmap(int(fd.Fd()), 0, int(size), mtype, unix.MAP_SHARED|unix.MAP_POPULATE)
 }
 
 // Munmap unmaps a previously mapped slice.
