@@ -1,3 +1,4 @@
+//go:build !windows && !plan9
 // +build !windows,!plan9
 
 /*
@@ -24,16 +25,16 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/dgraph-io/badger/y"
 	"github.com/pkg/errors"
-	"golang.org/x/sys/unix"
+
+	"github.com/dgraph-io/badger/y"
 )
 
 // directoryLockGuard holds a lock on a directory and a pid file inside.  The pid file isn't part
 // of the locking mechanism, it's just advisory.
 type directoryLockGuard struct {
 	// File handle on the directory, which we've flocked.
-	f *os.File
+	f *File
 	// The absolute path to our pid file.
 	path string
 	// Was this a shared lock for a read-only database?
@@ -45,27 +46,26 @@ type directoryLockGuard struct {
 // dirPath/pidFileName for convenience.
 func acquireDirectoryLock(dirPath string, pidFileName string, readOnly bool) (
 	*directoryLockGuard, error) {
+	if err := os.MkdirAll(dirPath, 0755); err != nil {
+		return nil, err
+	}
 	// Convert to absolute path so that Release still works even if we do an unbalanced
 	// chdir in the meantime.
 	absPidFilePath, err := filepath.Abs(filepath.Join(dirPath, pidFileName))
 	if err != nil {
 		return nil, errors.Wrap(err, "cannot get absolute path for pid lock file")
 	}
-	f, err := os.Open(dirPath)
-	if err != nil {
-		return nil, errors.Wrapf(err, "cannot open directory %q", dirPath)
-	}
-	opts := unix.LOCK_EX | unix.LOCK_NB
+
+	opts := os.O_WRONLY | os.O_TRUNC | os.O_CREATE
 	if readOnly {
-		opts = unix.LOCK_SH | unix.LOCK_NB
+		opts = os.O_RDONLY | os.O_CREATE
 	}
 
-	err = unix.Flock(int(f.Fd()), opts)
+	f, err := OpenFile(absPidFilePath, opts, 0666)
 	if err != nil {
-		f.Close()
 		return nil, errors.Wrapf(err,
 			"Cannot acquire directory lock on %q.  Another process is using this Badger database.",
-			dirPath)
+			absPidFilePath)
 	}
 
 	if !readOnly {
