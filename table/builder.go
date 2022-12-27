@@ -22,15 +22,15 @@ import (
 	"math"
 	"unsafe"
 
+	"github.com/dgraph-io/ristretto/z"
 	"github.com/dgryski/go-farm"
 	"github.com/golang/protobuf/proto"
-	"github.com/golang/snappy"
+	"github.com/klauspost/compress/snappy"
 	"github.com/pkg/errors"
 
 	"github.com/dgraph-io/badger/v2/options"
 	"github.com/dgraph-io/badger/v2/pb"
 	"github.com/dgraph-io/badger/v2/y"
-	"github.com/dgraph-io/ristretto/z"
 )
 
 func newBuffer(sz int) *bytes.Buffer {
