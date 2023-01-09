@@ -28,7 +28,7 @@ func TestBuildKeyValueSizeHistogram(t *testing.T) {
 			entries := int64(40)
 			err := db.Update(func(txn *Txn) error {
 				for i := int64(0); i < entries; i++ {
-					err := txn.SetEntry(NewEntry([]byte(string(i)), []byte("B")))
+					err := txn.SetEntry(NewEntry([]byte(string(rune(i))), []byte("B")))
 					if err != nil {
 						return err
 					}
