@@ -21,8 +21,10 @@ import (
 	"encoding/binary"
 	"io"
 	"math"
+	"unsafe"
 
 	"github.com/AndreasBriese/bbloom"
+
 	"github.com/dgraph-io/badger/y"
 )
 
@@ -36,32 +38,33 @@ func newBuffer(sz int) *bytes.Buffer {
 	return b
 }
 
+const headerSize = int(unsafe.Sizeof(header{}))
+
 type header struct {
+	prev uint32 // Offset for the previous key-value pair. The offset is relative to block base offset.
 	plen uint16 // Overlap with base key.
 	klen uint16 // Length of the diff.
 	vlen uint16 // Length of value.
-	prev uint32 // Offset for the previous key-value pair. The offset is relative to block base offset.
 }
 
 // Encode encodes the header.
-func (h header) Encode(b []byte) {
-	binary.BigEndian.PutUint16(b[0:2], h.plen)
-	binary.BigEndian.PutUint16(b[2:4], h.klen)
-	binary.BigEndian.PutUint16(b[4:6], h.vlen)
-	binary.BigEndian.PutUint32(b[6:10], h.prev)
+func (h header) Encode() []byte {
+	var b [headerSize]byte
+	*(*header)(unsafe.Pointer(&b[0])) = h
+	return b[:]
 }
 
 // Decode decodes the header.
 func (h *header) Decode(buf []byte) int {
-	h.plen = binary.BigEndian.Uint16(buf[0:2])
-	h.klen = binary.BigEndian.Uint16(buf[2:4])
-	h.vlen = binary.BigEndian.Uint16(buf[4:6])
-	h.prev = binary.BigEndian.Uint32(buf[6:10])
+	// Copy over data from buf into h. Using *h=unsafe.pointer(...) leads to
+	// pointer alignment issues. See https://github.com/dgraph-io/badger/issues/1096
+	// and comment https://github.com/dgraph-io/badger/pull/1097#pullrequestreview-307361714
+	copy((*[headerSize]byte)(unsafe.Pointer(h))[:], buf[:headerSize])
 	return h.Size()
 }
 
 // Size returns size of the header. Currently it's just a constant.
-func (h header) Size() int { return 10 }
+func (h header) Size() int { return headerSize }
 
 // Builder is used in building a table.
 type Builder struct {
@@ -139,9 +142,7 @@ func (b *Builder) addHelper(key []byte, v y.ValueStruct) {
 	b.prevOffset = uint32(b.buf.Len()) - b.baseOffset // Remember current offset for the next Add call.
 
 	// Layout: header, diffKey, value.
-	var hbuf [10]byte
-	h.Encode(hbuf[:])
-	b.buf.Write(hbuf[:])
+	b.buf.Write(h.Encode())
 	b.buf.Write(diffKey) // We only need to store the key difference.
 
 	v.EncodeTo(b.buf)
@@ -222,15 +223,17 @@ func (b *Builder) Finish() []byte {
 
 	b.finishBlock() // This will never start a new block.
 	index := b.blockIndex()
-	b.buf.Write(index)
+	n, err := b.buf.Write(index)
+	y.Check(err)
 
 	// Write bloom filter.
 	bdata := bf.JSONMarshal()
-	n, err := b.buf.Write(bdata)
+	n, err = b.buf.Write(bdata)
 	y.Check(err)
 	var buf [4]byte
 	binary.BigEndian.PutUint32(buf[:], uint32(n))
-	b.buf.Write(buf[:])
+	_, err = b.buf.Write(buf[:])
+	y.Check(err)
 
 	return b.buf.Bytes()
 }

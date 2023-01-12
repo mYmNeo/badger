@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"time"
+	"unsafe"
 
 	"github.com/dgraph-io/badger/y"
 )
@@ -30,20 +31,21 @@ func (p valuePointer) IsZero() bool {
 	return p.Fid == 0 && p.Offset == 0 && p.Len == 0
 }
 
-const vptrSize = 12
+const vptrSize = int(unsafe.Sizeof(valuePointer{}))
 
 // Encode encodes Pointer into byte buffer.
-func (p valuePointer) Encode(b []byte) []byte {
-	binary.BigEndian.PutUint32(b[:4], p.Fid)
-	binary.BigEndian.PutUint32(b[4:8], p.Len)
-	binary.BigEndian.PutUint32(b[8:12], p.Offset)
-	return b[:vptrSize]
+func (p valuePointer) Encode() []byte {
+	var b [vptrSize]byte
+	// Copy over the content from p to b.
+	*(*valuePointer)(unsafe.Pointer(&b[0])) = p
+	return b[:]
 }
 
 func (p *valuePointer) Decode(b []byte) {
-	p.Fid = binary.BigEndian.Uint32(b[:4])
-	p.Len = binary.BigEndian.Uint32(b[4:8])
-	p.Offset = binary.BigEndian.Uint32(b[8:12])
+	// Copy over data from b into p. Using *p=unsafe.pointer(...) leads to
+	// pointer alignment issues. See https://github.com/dgraph-io/badger/issues/1096
+	// and comment https://github.com/dgraph-io/badger/pull/1097#pullrequestreview-307361714
+	copy((*[vptrSize]byte)(unsafe.Pointer(p))[:], b[:vptrSize])
 }
 
 // header is used in value log as a header before Entry.
@@ -95,7 +97,7 @@ func (e *Entry) estimateSize(threshold int) int {
 	if len(e.Value) < threshold {
 		return len(e.Key) + len(e.Value) + 2 // Meta, UserMeta
 	}
-	return len(e.Key) + 12 + 2 // 12 for ValuePointer, 2 for metas.
+	return len(e.Key) + vptrSize + 2 // 12 for ValuePointer, 2 for metas.
 }
 
 // Encodes e to buf. Returns number of bytes written.

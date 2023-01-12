@@ -21,11 +21,12 @@ import (
 	"math"
 	"sync"
 
+	"github.com/dustin/go-humanize"
+	"github.com/pkg/errors"
+
 	"github.com/dgraph-io/badger/pb"
 	"github.com/dgraph-io/badger/table"
 	"github.com/dgraph-io/badger/y"
-	humanize "github.com/dustin/go-humanize"
-	"github.com/pkg/errors"
 )
 
 const headStreamId uint32 = math.MaxUint32
@@ -209,8 +210,7 @@ func (sw *StreamWriter) Flush() error {
 	}
 
 	// Encode and write the value log head into a new table.
-	data := make([]byte, vptrSize)
-	data = sw.maxHead.Encode(data)
+	data := sw.maxHead.Encode()
 	headWriter := sw.newWriter(headStreamId)
 	if err := headWriter.Add(
 		y.KeyWithTs(head, sw.maxVersion),
@@ -304,9 +304,8 @@ func (w *sortedWriter) handleRequests() {
 					ExpiresAt: e.ExpiresAt,
 				}
 			} else {
-				vbuf := make([]byte, vptrSize)
 				vs = y.ValueStruct{
-					Value:     vptr.Encode(vbuf),
+					Value:     vptr.Encode(),
 					Meta:      e.meta | bitValuePointer,
 					UserMeta:  e.UserMeta,
 					ExpiresAt: e.ExpiresAt,
