@@ -134,8 +134,7 @@ func (db *DB) replayFunction() func(Entry, valuePointer) error {
 			nv = make([]byte, len(e.Value))
 			copy(nv, e.Value)
 		} else {
-			nv = make([]byte, vptrSize)
-			vp.Encode(nv)
+			nv = vp.Encode()
 			meta = meta | bitValuePointer
 		}
 		// Update vhead. If the crash happens while replay was in progess
@@ -612,10 +611,9 @@ func (db *DB) writeToLSM(b *request) error {
 					ExpiresAt: entry.ExpiresAt,
 				})
 		} else {
-			var offsetBuf [vptrSize]byte
 			db.mt.Put(entry.Key,
 				y.ValueStruct{
-					Value:     b.Ptrs[i].Encode(offsetBuf[:]),
+					Value:     b.Ptrs[i].Encode(),
 					Meta:      entry.meta | bitValuePointer,
 					UserMeta:  entry.UserMeta,
 					ExpiresAt: entry.ExpiresAt,
@@ -888,13 +886,10 @@ func (db *DB) pushHead(ft flushTask) error {
 
 	// Store badger head even if vptr is zero, need it for readTs
 	db.opt.Debugf("Storing value log head: %+v\n", ft.vptr)
-	offset := make([]byte, vptrSize)
-	ft.vptr.Encode(offset)
-
 	// Pick the max commit ts, so in case of crash, our read ts would be higher than all the
 	// commits.
 	headTs := y.KeyWithTs(head, db.orc.nextTs())
-	ft.mt.Put(headTs, y.ValueStruct{Value: offset})
+	ft.mt.Put(headTs, y.ValueStruct{Value: ft.vptr.Encode()})
 
 	return nil
 }

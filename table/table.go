@@ -277,7 +277,7 @@ func (t *Table) readIndex() error {
 		h.Decode(hbuf)
 		y.AssertTrue(h.plen == 0)
 
-		key := t.readNoFail(ko.offset+len(hbuf), int(h.klen))
+		key := t.readNoFail(ko.offset+h.Size(), int(h.klen))
 		ko.key = append([]byte{}, key...)
 	}
 

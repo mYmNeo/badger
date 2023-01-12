@@ -21,9 +21,10 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/pkg/errors"
+
 	"github.com/dgraph-io/badger/table"
 	"github.com/dgraph-io/badger/y"
-	"github.com/pkg/errors"
 )
 
 type levelHandler struct {
@@ -273,7 +274,7 @@ func (s *levelHandler) get(key []byte) (y.ValueStruct, error) {
 		}
 		if y.SameKey(key, it.Key()) {
 			if version := y.ParseTs(it.Key()); maxVs.Version < version {
-				maxVs = it.Value()
+				maxVs = it.ValueCopy()
 				maxVs.Version = version
 			}
 		}
