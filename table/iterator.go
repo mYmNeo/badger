@@ -40,14 +40,15 @@ type blockIterator struct {
 	last header // The last header we saw.
 }
 
-func (itr *blockIterator) Reset() {
+func (itr *blockIterator) setBlock(b *block) {
 	itr.pos = 0
 	itr.err = nil
-	itr.baseKey = []byte{}
-	itr.key = []byte{}
-	itr.val = []byte{}
+	itr.baseKey = itr.baseKey[:0]
+	itr.key = itr.key[:0]
+	itr.val = itr.val[:0]
 	itr.init = false
 	itr.last = header{}
+	itr.data = b.data
 }
 
 func (itr *blockIterator) Init() {
@@ -77,7 +78,7 @@ func (itr *blockIterator) Seek(key []byte, whence int) {
 
 	switch whence {
 	case origin:
-		itr.Reset()
+		// We don't need to do anything. startIndex is already at 0
 	case current:
 	}
 
@@ -195,7 +196,7 @@ func (itr *blockIterator) Value() []byte {
 type Iterator struct {
 	t    *Table
 	bpos int
-	bi   *blockIterator
+	bi   blockIterator
 	err  error
 
 	// Internally, Iterator is bidirectional. However, we only expose the
@@ -238,7 +239,7 @@ func (itr *Iterator) seekToFirst() {
 		itr.err = err
 		return
 	}
-	itr.bi = block.NewIterator()
+	itr.bi.setBlock(block)
 	itr.bi.SeekToFirst()
 	itr.err = itr.bi.Error()
 }
@@ -255,7 +256,7 @@ func (itr *Iterator) seekToLast() {
 		itr.err = err
 		return
 	}
-	itr.bi = block.NewIterator()
+	itr.bi.setBlock(block)
 	itr.bi.SeekToLast()
 	itr.err = itr.bi.Error()
 }
@@ -267,7 +268,7 @@ func (itr *Iterator) seekHelper(blockIdx int, key []byte) {
 		itr.err = err
 		return
 	}
-	itr.bi = block.NewIterator()
+	itr.bi.setBlock(block)
 	itr.bi.Seek(key, origin)
 	itr.err = itr.bi.Error()
 }
@@ -334,13 +335,13 @@ func (itr *Iterator) next() {
 		return
 	}
 
-	if itr.bi == nil {
+	if len(itr.bi.data) == 0 {
 		block, err := itr.t.block(itr.bpos)
 		if err != nil {
 			itr.err = err
 			return
 		}
-		itr.bi = block.NewIterator()
+		itr.bi.setBlock(block)
 		itr.bi.SeekToFirst()
 		itr.err = itr.bi.Error()
 		return
@@ -349,7 +350,7 @@ func (itr *Iterator) next() {
 	itr.bi.Next()
 	if !itr.bi.Valid() {
 		itr.bpos++
-		itr.bi = nil
+		itr.bi.data = nil
 		itr.next()
 		return
 	}
@@ -362,13 +363,13 @@ func (itr *Iterator) prev() {
 		return
 	}
 
-	if itr.bi == nil {
+	if len(itr.bi.data) == 0 {
 		block, err := itr.t.block(itr.bpos)
 		if err != nil {
 			itr.err = err
 			return
 		}
-		itr.bi = block.NewIterator()
+		itr.bi.setBlock(block)
 		itr.bi.SeekToLast()
 		itr.err = itr.bi.Error()
 		return
@@ -377,7 +378,7 @@ func (itr *Iterator) prev() {
 	itr.bi.Prev()
 	if !itr.bi.Valid() {
 		itr.bpos--
-		itr.bi = nil
+		itr.bi.data = nil
 		itr.prev()
 		return
 	}
