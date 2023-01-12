@@ -28,11 +28,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dgraph-io/badger/options"
-	"github.com/dgraph-io/badger/y"
-	humanize "github.com/dustin/go-humanize"
+	"github.com/dustin/go-humanize"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/net/trace"
+
+	"github.com/dgraph-io/badger/options"
+	"github.com/dgraph-io/badger/y"
 )
 
 func TestValueBasic(t *testing.T) {
@@ -482,6 +483,8 @@ func TestPersistLFDiscardStats(t *testing.T) {
 	err = db.Close()
 	require.NoError(t, err)
 
+	// Avoid running compactors on reopening badger.
+	opt.NumCompactors = 0
 	db, err = Open(opt)
 	require.NoError(t, err)
 	defer db.Close()

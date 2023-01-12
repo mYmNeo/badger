@@ -29,10 +29,11 @@ import (
 
 	"golang.org/x/net/trace"
 
+	"github.com/pkg/errors"
+
 	"github.com/dgraph-io/badger/pb"
 	"github.com/dgraph-io/badger/table"
 	"github.com/dgraph-io/badger/y"
-	"github.com/pkg/errors"
 )
 
 type levelsController struct {
@@ -294,7 +295,7 @@ func (s *levelsController) dropPrefixes(prefixes [][]byte) error {
 					// function in logs, and forces a compaction.
 					dropPrefixes: prefixes,
 				}
-				if err := s.doCompact(cp); err != nil {
+				if err := s.doCompact(174, cp); err != nil {
 					opt.Warningf("While compacting level 0: %v", err)
 					return nil
 				}
@@ -354,11 +355,13 @@ func (s *levelsController) startCompact(lc *y.Closer) {
 	n := s.kv.opt.NumCompactors
 	lc.AddRunning(n - 1)
 	for i := 0; i < n; i++ {
-		go s.runWorker(lc)
+		// The worker with id=0 is dedicated to L0 and L1. This is not counted
+		// towards the user specified NumCompactors.
+		go s.runCompactor(i, lc)
 	}
 }
 
-func (s *levelsController) runWorker(lc *y.Closer) {
+func (s *levelsController) runCompactor(id int, lc *y.Closer) {
 	defer lc.Done()
 
 	randomDelay := time.NewTimer(time.Duration(rand.Int31n(1000)) * time.Millisecond)
@@ -369,7 +372,7 @@ func (s *levelsController) runWorker(lc *y.Closer) {
 		return
 	}
 
-	ticker := time.NewTicker(time.Second)
+	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
@@ -377,12 +380,23 @@ func (s *levelsController) runWorker(lc *y.Closer) {
 		// Can add a done channel or other stuff.
 		case <-ticker.C:
 			prios := s.pickCompactLevels()
+		loop:
 			for _, p := range prios {
-				if err := s.doCompact(p); err == nil {
-					break
-				} else if err == errFillTables {
+				if id == 0 && p.level > 1 {
+					// If I'm ID zero, I only compact L0 and L1.
+					continue
+				}
+				if id != 0 && p.level <= 1 {
+					// If I'm ID non-zero, I do NOT compact L0 and L1.
+					continue
+				}
+				err := s.doCompact(id, p)
+				switch err {
+				case nil:
+					break loop
+				case errFillTables:
 					// pass
-				} else {
+				default:
 					s.kv.opt.Warningf("While running doCompact: %v\n", err)
 				}
 			}
@@ -520,12 +534,11 @@ nextTable:
 	// that would affect the snapshot view guarantee provided by transactions.
 	discardTs := s.kv.orc.discardAtOrBelow()
 
-	// Start generating new tables.
-	type newTableResult struct {
-		table *table.Table
-		err   error
-	}
-	resultCh := make(chan newTableResult)
+	var newTables []*table.Table
+	mu := new(sync.Mutex) // Guards newTables
+	inflightBuilders := y.NewThrottle(5)
+	var vp valuePointer
+
 	var numBuilds, numVersions int
 	var lastKey, skipKey []byte
 	for it.Valid() {
@@ -605,64 +618,72 @@ nextTable:
 				}
 			}
 			numKeys++
-			builder.Add(it.Key(), it.Value())
+			if vs.Meta&bitValuePointer > 0 {
+				vp.Decode(vs.Value)
+			}
+			builder.Add(it.Key(), vs)
 		}
 		// It was true that it.Valid() at least once in the loop above, which means we
 		// called Add() at least once, and builder is not Empty().
 		s.kv.opt.Debugf("LOG Compact. Added %d keys. Skipped %d keys. Iteration took: %v",
 			numKeys, numSkips, time.Since(timeStart))
-		if !builder.Empty() {
-			numBuilds++
-			fileID := s.reserveFileID()
-			go func(builder *table.Builder) {
-				defer builder.Close()
+		if builder.Empty() {
+			continue
+		}
+		numBuilds++
+		fileID := s.reserveFileID()
+		if err := inflightBuilders.Do(); err != nil {
+			// Can't return from here, until I decrRef all the tables that I built so far.
+			break
+		}
 
-				fd, err := y.CreateSyncedFile(table.NewFilename(fileID, s.kv.opt.Dir), true)
+		go func(builder *table.Builder, fid uint64) {
+			var err error
+
+			defer builder.Close()
+			defer inflightBuilders.Done(err)
+
+			build := func(fileID uint64) (*table.Table, error) {
+				fd, err := y.CreateSyncedFile(table.NewFilename(fid, s.kv.opt.Dir), true)
 				if err != nil {
-					resultCh <- newTableResult{nil, errors.Wrapf(err, "While opening new table: %d", fileID)}
-					return
+					return nil, errors.Wrapf(err, "While opening new table: %d", fid)
 				}
 
 				if _, err := fd.Write(builder.Finish()); err != nil {
-					resultCh <- newTableResult{nil, errors.Wrapf(err, "Unable to write to file: %d", fileID)}
-					return
+					return nil, errors.Wrapf(err, "Unable to write to file: %d", fid)
 				}
-
-				tbl, err := table.OpenTable(fd, s.kv.opt.TableLoadingMode, nil)
+				newTbl, err := table.OpenTable(fd, s.kv.opt.TableLoadingMode, nil)
 				// decrRef is added below.
-				resultCh <- newTableResult{tbl, errors.Wrapf(err, "Unable to open table: %q", fd.Name())}
-			}(builder)
-		}
+				return newTbl, errors.Wrapf(err, "Unable to open table: %q", fd.Name())
+			}
+
+			var tbl *table.Table
+			tbl, err = build(fid)
+			// If we couldn't build the table, return fast.
+			if err != nil {
+				return
+			}
+
+			mu.Lock()
+			newTables = append(newTables, tbl)
+			mu.Unlock()
+		}(builder, fileID)
 	}
 
-	newTables := make([]*table.Table, 0, 20)
-	// Wait for all table builders to finish.
-	var firstErr error
-	for x := 0; x < numBuilds; x++ {
-		res := <-resultCh
-		newTables = append(newTables, res.table)
-		if firstErr == nil {
-			firstErr = res.err
-		}
-	}
-
-	if firstErr == nil {
+	// Wait for all table builders to finish and also for newTables accumulator to finish.
+	err := inflightBuilders.Finish()
+	if err == nil {
 		// Ensure created files' directory entries are visible.  We don't mind the extra latency
 		// from not doing this ASAP after all file creation has finished because this is a
 		// background operation.
-		firstErr = syncDir(s.kv.opt.Dir)
+		err = syncDir(s.kv.opt.Dir)
 	}
 
-	if firstErr != nil {
+	if err != nil {
 		// An error happened.  Delete all the newly created table files (by calling DecrRef
 		// -- we're the only holders of a ref).
-		for j := 0; j < numBuilds; j++ {
-			if newTables[j] != nil {
-				_ = newTables[j].DecrRef()
-			}
-		}
-		errorReturn := errors.Wrapf(firstErr, "While running compaction for: %+v", cd)
-		return nil, nil, errorReturn
+		_ = decrRefs(newTables)
+		return nil, nil, errors.Wrapf(err, "while running compactions for: %+v", cd)
 	}
 
 	sort.Slice(newTables, func(i, j int) bool {
@@ -901,7 +922,7 @@ func (s *levelsController) runCompactDef(l int, cd compactDef) (err error) {
 var errFillTables = errors.New("Unable to fill tables")
 
 // doCompact picks some table on level l and compacts it away to the next level.
-func (s *levelsController) doCompact(p compactionPriority) error {
+func (s *levelsController) doCompact(id int, p compactionPriority) error {
 	l := p.level
 	y.AssertTrue(l+1 < s.kv.opt.MaxLevels) // Sanity check.
 
@@ -914,7 +935,7 @@ func (s *levelsController) doCompact(p compactionPriority) error {
 	cd.elog.SetMaxEvents(100)
 	defer cd.elog.Finish()
 
-	s.kv.opt.Infof("Got compaction priority: %+v", p)
+	s.kv.opt.Debugf("[Compactor: %d] Attempting to run compaction: %+v", id, p)
 
 	// While picking tables to be compacted, both levels' tables are expected to
 	// remain unchanged.
@@ -930,16 +951,17 @@ func (s *levelsController) doCompact(p compactionPriority) error {
 	}
 	defer s.cstatus.delete(cd) // Remove the ranges from compaction status.
 
-	s.kv.opt.Infof("Running for level: %d\n", cd.thisLevel.level)
+	s.kv.opt.Infof("[Compactor: %d] Running compaction: %+v for level: %d\n",
+		id, p, cd.thisLevel.level)
 	s.cstatus.toLog(cd.elog)
 	if err := s.runCompactDef(l, cd); err != nil {
 		// This compaction couldn't be done successfully.
-		s.kv.opt.Warningf("LOG Compact FAILED with error: %+v: %+v", err, cd)
+		s.kv.opt.Warningf("[Compactor: %d] LOG Compact FAILED with error: %+v: %+v", id, err, cd)
 		return err
 	}
 
 	s.cstatus.toLog(cd.elog)
-	s.kv.opt.Infof("Compaction for level: %d DONE", cd.thisLevel.level)
+	s.kv.opt.Infof("[Compactor: %d] Compaction for level: %d DONE", id, cd.thisLevel.level)
 	return nil
 }
 
@@ -959,7 +981,7 @@ func (s *levelsController) addLevel0Table(t *table.Table) error {
 		// Stall. Make sure all levels are healthy before we unstall.
 		var timeStart time.Time
 		{
-			s.elog.Printf("STALLED STALLED STALLED: %v\n", time.Since(lastUnstalled))
+			s.kv.opt.Infof("STALLED STALLED STALLED: %v\n", time.Since(lastUnstalled))
 			s.cstatus.RLock()
 			for i := 0; i < s.kv.opt.MaxLevels; i++ {
 				s.elog.Printf("level=%d. Status=%s Size=%d\n",

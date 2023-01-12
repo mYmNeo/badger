@@ -31,14 +31,15 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/dustin/go-humanize"
+	"github.com/pkg/errors"
+	"golang.org/x/net/trace"
+
 	"github.com/dgraph-io/badger/options"
 	"github.com/dgraph-io/badger/pb"
 	"github.com/dgraph-io/badger/skl"
 	"github.com/dgraph-io/badger/table"
 	"github.com/dgraph-io/badger/y"
-	humanize "github.com/dustin/go-humanize"
-	"github.com/pkg/errors"
-	"golang.org/x/net/trace"
 )
 
 var (
@@ -191,6 +192,12 @@ func (db *DB) replayFunction() func(Entry, valuePointer) error {
 
 // Open returns a new DB object.
 func Open(opt Options) (db *DB, err error) {
+	// It's okay to have zero compactors which will disable all compactions but
+	// we cannot have just one compactor otherwise we will end up with all data
+	// one level 2.
+	if opt.NumCompactors == 1 {
+		return nil, errors.New("Cannot have 1 compactor. Need at least 2")
+	}
 	opt.maxBatchSize = (15 * opt.MaxTableSize) / 100
 	opt.maxBatchCount = opt.maxBatchSize / int64(skl.MaxNodeSize)
 
@@ -423,7 +430,7 @@ func (db *DB) close() (err error) {
 	// Force Compact L0
 	// We don't need to care about cstatus since no parallel compaction is running.
 	if db.opt.CompactL0OnClose {
-		err := db.lc.doCompact(compactionPriority{level: 0, score: 1.73})
+		err := db.lc.doCompact(173, compactionPriority{level: 0, score: 1.73})
 		switch err {
 		case errFillTables:
 			// This error only means that there might be enough tables to do a compaction. So, we
@@ -767,7 +774,8 @@ func (db *DB) doWrites(lc *y.Closer) {
 
 // batchSet applies a list of badger.Entry. If a request level error occurs it
 // will be returned.
-//   Check(kv.BatchSet(entries))
+//
+//	Check(kv.BatchSet(entries))
 func (db *DB) batchSet(entries []*Entry) error {
 	req, err := db.sendToWriteCh(entries)
 	if err != nil {
@@ -780,9 +788,10 @@ func (db *DB) batchSet(entries []*Entry) error {
 // batchSetAsync is the asynchronous version of batchSet. It accepts a callback
 // function which is called when all the sets are complete. If a request level
 // error occurs, it will be passed back via the callback.
-//   err := kv.BatchSetAsync(entries, func(err error)) {
-//      Check(err)
-//   }
+//
+//	err := kv.BatchSetAsync(entries, func(err error)) {
+//	   Check(err)
+//	}
 func (db *DB) batchSetAsync(entries []*Entry, f func(error)) error {
 	req, err := db.sendToWriteCh(entries)
 	if err != nil {
@@ -1293,7 +1302,7 @@ func (db *DB) Flatten(workers int) error {
 		errCh := make(chan error, 1)
 		for i := 0; i < workers; i++ {
 			go func() {
-				errCh <- db.lc.doCompact(cp)
+				errCh <- db.lc.doCompact(175, cp)
 			}()
 		}
 		var success int
@@ -1454,16 +1463,16 @@ func (db *DB) dropAll() (func(), error) {
 }
 
 // DropPrefix would drop all the keys with the provided prefix. It does this in the following way:
-// - Stop accepting new writes.
-// - Stop memtable flushes before acquiring lock. Because we're acquring lock here
-//   and memtable flush stalls for lock, which leads to deadlock
-// - Flush out all memtables, skipping over keys with the given prefix, Kp.
-// - Write out the value log header to memtables when flushing, so we don't accidentally bring Kp
-//   back after a restart.
-// - Stop compaction.
-// - Compact L0->L1, skipping over Kp.
-// - Compact rest of the levels, Li->Li, picking tables which have Kp.
-// - Resume memtable flushes, compactions and writes.
+//   - Stop accepting new writes.
+//   - Stop memtable flushes before acquiring lock. Because we're acquring lock here
+//     and memtable flush stalls for lock, which leads to deadlock
+//   - Flush out all memtables, skipping over keys with the given prefix, Kp.
+//   - Write out the value log header to memtables when flushing, so we don't accidentally bring Kp
+//     back after a restart.
+//   - Stop compaction.
+//   - Compact L0->L1, skipping over Kp.
+//   - Compact rest of the levels, Li->Li, picking tables which have Kp.
+//   - Resume memtable flushes, compactions and writes.
 func (db *DB) DropPrefix(prefixes ...[]byte) error {
 	db.opt.Infof("DropPrefix Called")
 	f := db.prepareToDrop()
