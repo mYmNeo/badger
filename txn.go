@@ -26,9 +26,10 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/dgraph-io/badger/y"
 	"github.com/dgraph-io/ristretto/z"
 	"github.com/pkg/errors"
+
+	"github.com/dgraph-io/badger/y"
 )
 
 type oracle struct {
@@ -200,21 +201,20 @@ func (o *oracle) doneCommit(cts uint64) {
 
 // Txn represents a Badger transaction.
 type Txn struct {
-	readTs   uint64
-	commitTs uint64
-
-	update bool     // update is used to conditionally keep track of reads.
 	reads  []uint64 // contains fingerprints of keys read.
 	writes []uint64 // contains fingerprints of keys written.
 
+	readTs   uint64
+	commitTs uint64
+	size     int64
+	count    int64
+	db       *DB
+
 	pendingWrites map[string]*Entry // cache stores any writes done by txn.
 
-	db        *DB
-	discarded bool
-
-	size         int64
-	count        int64
 	numIterators int32
+	discarded    bool
+	update       bool // update is used to conditionally keep track of reads.
 }
 
 type pendingWritesIterator struct {
@@ -419,8 +419,7 @@ func (txn *Txn) Get(key []byte) (item *Item, rerr error) {
 	item.version = vs.Version
 	item.meta = vs.Meta
 	item.userMeta = vs.UserMeta
-	item.db = txn.db
-	item.vptr = vs.Value // TODO: Do we need to copy this over?
+	item.vptr = y.SafeCopy(item.vptr, vs.Value)
 	item.txn = txn
 	item.expiresAt = vs.ExpiresAt
 	return item, nil
@@ -627,9 +626,9 @@ func (txn *Txn) ReadTs() uint64 {
 // to. Commit API internally runs Discard, but running it twice wouldn't cause
 // any issues.
 //
-//  txn := db.NewTransaction(false)
-//  defer txn.Discard()
-//  // Call various APIs.
+//	txn := db.NewTransaction(false)
+//	defer txn.Discard()
+//	// Call various APIs.
 func (db *DB) NewTransaction(update bool) *Txn {
 	return db.newTransaction(update, false)
 }

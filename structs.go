@@ -84,12 +84,11 @@ func (h *header) Decode(buf []byte) {
 type Entry struct {
 	Key       []byte
 	Value     []byte
-	UserMeta  byte
 	ExpiresAt uint64 // time.Unix
+	offset    uint32
+	UserMeta  byte
 	meta      byte
-
 	// Fields maintained internally.
-	offset   uint32
 	skipVlog bool
 }
 
