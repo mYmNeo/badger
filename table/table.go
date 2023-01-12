@@ -31,9 +31,10 @@ import (
 	"sync/atomic"
 
 	"github.com/AndreasBriese/bbloom"
+	"github.com/pkg/errors"
+
 	"github.com/dgraph-io/badger/options"
 	"github.com/dgraph-io/badger/y"
-	"github.com/pkg/errors"
 )
 
 const fileSuffix = ".sst"
@@ -283,14 +284,14 @@ func (t *Table) readIndex() error {
 	return nil
 }
 
-func (t *Table) block(idx int) (block, error) {
+func (t *Table) block(idx int) (*block, error) {
 	y.AssertTruef(idx >= 0, "idx=%d", idx)
 	if idx >= len(t.blockIndex) {
-		return block{}, errors.New("block out of index")
+		return nil, errors.New("block out of index")
 	}
 
 	ko := t.blockIndex[idx]
-	blk := block{
+	blk := &block{
 		offset: ko.offset,
 	}
 	var err error
