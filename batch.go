@@ -30,6 +30,7 @@ type WriteBatch struct {
 	throttle *y.Throttle
 	err      error
 	commitTs uint64
+	finished bool
 }
 
 // NewWriteBatch creates a new WriteBatch. This provides a way to conveniently do a lot of writes,
@@ -67,6 +68,9 @@ func (wb *WriteBatch) SetMaxPendingTxns(max int) {
 //
 // Note that any committed writes would still go through despite calling Cancel.
 func (wb *WriteBatch) Cancel() {
+	wb.Lock()
+	defer wb.Unlock()
+	wb.finished = true
 	if err := wb.throttle.Finish(); err != nil {
 		wb.db.opt.Errorf("WatchBatch.Cancel error while finishing: %v", err)
 	}
@@ -138,6 +142,9 @@ func (wb *WriteBatch) commit() error {
 	if wb.err != nil {
 		return wb.err
 	}
+	if wb.finished {
+		return y.ErrCommitAfterFinish
+	}
 	if err := wb.throttle.Do(); err != nil {
 		return err
 	}
@@ -152,7 +159,12 @@ func (wb *WriteBatch) commit() error {
 // returns any error stored by WriteBatch.
 func (wb *WriteBatch) Flush() error {
 	wb.Lock()
-	_ = wb.commit()
+	err := wb.commit()
+	if err != nil {
+		wb.Unlock()
+		return err
+	}
+	wb.finished = true
 	wb.txn.Discard()
 	wb.Unlock()
 

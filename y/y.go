@@ -29,9 +29,15 @@ import (
 	"github.com/pkg/errors"
 )
 
-// ErrEOF indicates an end of file when trying to read from a memory mapped file
-// and encountering the end of slice.
-var ErrEOF = errors.New("End of mapped region")
+var (
+	// ErrEOF indicates an end of file when trying to read from a memory mapped file
+	// and encountering the end of slice.
+	ErrEOF = errors.New("End of mapped region")
+
+	// ErrCommitAfterFinish indicates that write batch commit was called after
+	// finish
+	ErrCommitAfterFinish = errors.New("Batch commit not permitted after finish")
+)
 
 const (
 	// Sync indicates that O_DSYNC should be set on the underlying file,
