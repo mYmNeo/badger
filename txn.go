@@ -33,15 +33,7 @@ import (
 )
 
 type oracle struct {
-	// A 64-bit integer must be at the top for memory alignment. See issue #311.
-	refCount  int64
-	isManaged bool // Does not change value, so no locking required.
-
-	sync.Mutex // For nextTxnTs and commits.
-	// writeChLock lock is for ensuring that transactions go to the write
-	// channel in the same order as their commit timestamps.
-	writeChLock sync.Mutex
-	nextTxnTs   uint64
+	nextTxnTs uint64
 
 	// Used to block NewTransaction, so all previous commits are visible to a new read.
 	txnMark *y.WaterMark
@@ -53,10 +45,19 @@ type oracle struct {
 
 	// commits stores a key fingerprint and latest commit counter for it.
 	// refCount is used to clear out commits map to avoid a memory blowup.
-	commits map[uint64]uint64
+	commits       map[uint64]uint64
+	lastCleanupTs uint64
 
 	// closer is used to stop watermarks.
 	closer *y.Closer
+
+	sync.Mutex // For nextTxnTs and commits.
+
+	// writeChLock lock is for ensuring that transactions go to the write
+	// channel in the same order as their commit timestamps.
+	writeChLock sync.Mutex
+
+	isManaged bool // Does not change value, so no locking required.
 }
 
 func newOracle(opt Options) *oracle {
@@ -78,28 +79,6 @@ func newOracle(opt Options) *oracle {
 
 func (o *oracle) Stop() {
 	o.closer.SignalAndWait()
-}
-
-func (o *oracle) addRef() {
-	atomic.AddInt64(&o.refCount, 1)
-}
-
-func (o *oracle) decrRef() {
-	if atomic.AddInt64(&o.refCount, -1) != 0 {
-		return
-	}
-
-	// Clear out commits maps to release memory.
-	o.Lock()
-	defer o.Unlock()
-	// Avoids the race where something new is added to commitsMap
-	// after we check refCount and before we take Lock.
-	if atomic.LoadInt64(&o.refCount) != 0 {
-		return
-	}
-	if len(o.commits) >= 1000 { // If the map is still small, let it slide.
-		o.commits = make(map[uint64]uint64)
-	}
 }
 
 func (o *oracle) readTs() uint64 {
@@ -139,6 +118,7 @@ func (o *oracle) setDiscardTs(ts uint64) {
 	o.Lock()
 	defer o.Unlock()
 	o.discardTs = ts
+	o.cleanupCommittedTransactions()
 }
 
 func (o *oracle) discardAtOrBelow() uint64 {
@@ -175,6 +155,9 @@ func (o *oracle) newCommitTs(txn *Txn) uint64 {
 
 	var ts uint64
 	if !o.isManaged {
+		o.doneRead(txn)
+		o.cleanupCommittedTransactions()
+
 		// This is the general case, when user doesn't specify the read and commit ts.
 		ts = o.nextTxnTs
 		o.nextTxnTs++
@@ -185,10 +168,50 @@ func (o *oracle) newCommitTs(txn *Txn) uint64 {
 		ts = txn.commitTs
 	}
 
+	y.AssertTrue(ts >= o.lastCleanupTs)
+
 	for _, w := range txn.writes {
 		o.commits[w] = ts // Update the commitTs.
 	}
 	return ts
+}
+
+func (o *oracle) doneRead(txn *Txn) {
+	if !txn.doneRead {
+		txn.doneRead = true
+		o.readMark.Done(txn.readTs)
+	}
+}
+
+func (o *oracle) cleanupCommittedTransactions() { // Must be called under o.Lock
+	if o.isManaged {
+		// In managedMode, we do not store any committedTxns. It is expected
+		// that the system using badger in managedmode performs it's own
+		// conflict detection.
+		return
+	}
+	// Same logic as discardAtOrBelow but unlocked
+	var maxReadTs uint64
+	if o.isManaged {
+		maxReadTs = o.discardTs
+	} else {
+		maxReadTs = o.readMark.DoneUntil()
+	}
+
+	y.AssertTrue(maxReadTs >= o.lastCleanupTs)
+
+	// do not run clean up if the maxReadTs (read timestamp of the
+	// oldest transaction that is still in flight) has not increased
+	if maxReadTs == o.lastCleanupTs {
+		return
+	}
+	o.lastCleanupTs = maxReadTs
+
+	for key, ts := range o.commits {
+		if ts <= maxReadTs {
+			delete(o.commits, key)
+		}
+	}
 }
 
 func (o *oracle) doneCommit(cts uint64) {
@@ -215,6 +238,7 @@ type Txn struct {
 	numIterators int32
 	discarded    bool
 	update       bool // update is used to conditionally keep track of reads.
+	doneRead     bool
 }
 
 type pendingWritesIterator struct {
@@ -446,10 +470,7 @@ func (txn *Txn) Discard() {
 	}
 	txn.discarded = true
 	if !txn.db.orc.isManaged {
-		txn.db.orc.readMark.Done(txn.readTs)
-	}
-	if txn.update {
-		txn.db.orc.decrRef()
+		txn.db.orc.doneRead(txn)
 	}
 }
 
@@ -646,8 +667,8 @@ func (db *DB) newTransaction(update, isManaged bool) *Txn {
 		size:   int64(len(txnKey) + 10), // Some buffer for the extra entry.
 	}
 	if update {
+		txn.writes = make([]uint64, 0)
 		txn.pendingWrites = make(map[string]*Entry)
-		txn.db.orc.addRef()
 	}
 	// It is important that the oracle addRef happens BEFORE we retrieve a read
 	// timestamp. Otherwise, it is possible that the oracle commit map would
