@@ -25,12 +25,13 @@ import (
 // WriteBatch holds the necessary info to perform batched writes.
 type WriteBatch struct {
 	sync.Mutex
-	txn      *Txn
-	db       *DB
-	throttle *y.Throttle
-	err      error
-	commitTs uint64
-	finished bool
+	txn       *Txn
+	db        *DB
+	throttle  *y.Throttle
+	err       error
+	commitTs  uint64
+	isManaged bool
+	finished  bool
 }
 
 // NewWriteBatch creates a new WriteBatch. This provides a way to conveniently do a lot of writes,
@@ -42,14 +43,15 @@ func (db *DB) NewWriteBatch() *WriteBatch {
 	if db.opt.managedTxns {
 		panic("cannot use NewWriteBatch in managed mode. Use NewWriteBatchAt instead")
 	}
-	return db.newWriteBatch()
+	return db.newWriteBatch(false)
 }
 
-func (db *DB) newWriteBatch() *WriteBatch {
+func (db *DB) newWriteBatch(isManaged bool) *WriteBatch {
 	return &WriteBatch{
-		db:       db,
-		txn:      db.newTransaction(true, true),
-		throttle: y.NewThrottle(16),
+		db:        db,
+		isManaged: isManaged,
+		txn:       db.newTransaction(true, isManaged),
+		throttle:  y.NewThrottle(16),
 	}
 }
 
@@ -149,8 +151,7 @@ func (wb *WriteBatch) commit() error {
 		return err
 	}
 	wb.txn.CommitWith(wb.callback)
-	wb.txn = wb.db.newTransaction(true, true)
-	wb.txn.readTs = 0 // We're not reading anything.
+	wb.txn = wb.db.newTransaction(true, wb.isManaged)
 	wb.txn.commitTs = wb.commitTs
 	return wb.err
 }
