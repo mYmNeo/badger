@@ -264,14 +264,6 @@ func (s *levelsController) dropTree() (int, error) {
 // are run through MergeIterator and compacted to create new tables. All the mechanisms of
 // compactions apply, i.e. level sizes and MANIFEST are updated as in the normal flow.
 func (s *levelsController) dropPrefixes(prefixes [][]byte) error {
-	// Internal move keys related to the given prefix should also be skipped.
-	for _, prefix := range prefixes {
-		key := make([]byte, 0, len(badgerMove)+len(prefix))
-		key = append(key, badgerMove...)
-		key = append(key, prefix...)
-		prefixes = append(prefixes, key)
-	}
-
 	opt := s.kv.opt
 	// Iterate levels in the reverse order because if we were to iterate from
 	// lower level (say level 0) to a higher level (say level 3) we could have
