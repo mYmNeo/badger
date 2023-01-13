@@ -11,8 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dgraph-io/badger/y"
 	"github.com/stretchr/testify/require"
+
+	"github.com/dgraph-io/badger/y"
 )
 
 func val(large bool) []byte {
@@ -409,6 +410,26 @@ func TestDropPrefix(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 0, numKeys(db2))
 	db2.Close()
+}
+
+func TestDropPrefixWithNoData(t *testing.T) {
+	runBadgerTest(t, nil, func(t *testing.T, db *DB) {
+		val := []byte("value")
+		require.NoError(t, db.Update(func(txn *Txn) error {
+			require.NoError(t, txn.Set([]byte("aaa"), val))
+			require.NoError(t, txn.Set([]byte("aab"), val))
+			require.NoError(t, txn.Set([]byte("aba"), val))
+			require.NoError(t, txn.Set([]byte("aca"), val))
+			return nil
+		}))
+
+		prefixes := [][]byte{[]byte("bbb")}
+		require.NoError(t, db.DropPrefix(prefixes...))
+		require.Equal(t, 4, numKeys(db))
+		prefixes = [][]byte{[]byte("aba"), []byte("bbb")}
+		require.NoError(t, db.DropPrefix(prefixes...))
+		require.Equal(t, 3, numKeys(db))
+	})
 }
 
 func TestDropPrefixWithPendingTxn(t *testing.T) {
