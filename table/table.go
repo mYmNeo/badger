@@ -165,14 +165,14 @@ func OpenTable(fd *os.File, mode options.FileLoadingMode, cksum []byte) (*Table,
 	defer it.Close()
 	it.Rewind()
 	if it.Valid() {
-		t.smallest = it.Key()
+		t.smallest = y.Copy(it.Key())
 	}
 
 	it2 := t.NewIterator(true)
 	defer it2.Close()
 	it2.Rewind()
 	if it2.Valid() {
-		t.biggest = it2.Key()
+		t.biggest = y.Copy(it2.Key())
 	}
 
 	switch mode {
