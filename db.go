@@ -1472,6 +1472,17 @@ func (db *DB) DropPrefix(prefixes ...[]byte) error {
 	db.opt.Infof("DropPrefix Called")
 	f := db.prepareToDrop()
 	defer f()
+
+	filtered, err := db.filterPrefixesToDrop(prefixes)
+	if err != nil {
+		return err
+	}
+	// If there is no prefix for which the data already exist, do not do anything.
+	if len(filtered) == 0 {
+		db.opt.Infof("No prefixes to drop")
+		return nil
+	}
+
 	// Block all foreign interactions with memory tables.
 	db.Lock()
 	defer db.Unlock()
@@ -1486,7 +1497,7 @@ func (db *DB) DropPrefix(prefixes ...[]byte) error {
 			mt: memtable,
 			// Ensure that the head of value log gets persisted to disk.
 			vptr:         db.vhead,
-			dropPrefixes: prefixes,
+			dropPrefixes: filtered,
 		}
 		db.opt.Debugf("Flushing memtable")
 		if err := db.handleFlushTask(task); err != nil {
@@ -1501,11 +1512,33 @@ func (db *DB) DropPrefix(prefixes ...[]byte) error {
 	db.mt = skl.NewSkiplist(arenaSize(db.opt))
 
 	// Drop prefixes from the levels.
-	if err := db.lc.dropPrefixes(prefixes); err != nil {
+	if err := db.lc.dropPrefixes(filtered); err != nil {
 		return err
 	}
 	db.opt.Infof("DropPrefix done")
 	return nil
+}
+
+func (db *DB) filterPrefixesToDrop(prefixes [][]byte) ([][]byte, error) {
+	var filtered [][]byte
+	for _, prefix := range prefixes {
+		err := db.View(func(txn *Txn) error {
+			iopts := DefaultIteratorOptions
+			iopts.Prefix = prefix
+			iopts.PrefetchValues = false
+			itr := txn.NewIterator(iopts)
+			defer itr.Close()
+			itr.Rewind()
+			if itr.ValidForPrefix(prefix) {
+				filtered = append(filtered, prefix)
+			}
+			return nil
+		})
+		if err != nil {
+			return filtered, err
+		}
+	}
+	return filtered, nil
 }
 
 // KVList contains a list of key-value pairs.
