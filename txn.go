@@ -528,13 +528,14 @@ func (txn *Txn) commitAndSend() (func() error, error) {
 	return ret, nil
 }
 
-func (txn *Txn) commitPrecheck() {
+func (txn *Txn) commitPrecheck() error {
 	if txn.commitTs == 0 && txn.db.opt.managedTxns {
-		panic("Commit cannot be called with managedDB=true. Use CommitAt.")
+		return errors.New("CommitTs cannot be zero. Please use commitAt instead")
 	}
 	if txn.discarded {
-		panic("Trying to commit a discarded txn")
+		return errors.New("Trying to commit a discarded txn")
 	}
+	return nil
 }
 
 // Commit commits the transaction, following these steps:
@@ -556,12 +557,15 @@ func (txn *Txn) commitPrecheck() {
 // If error is nil, the transaction is successfully committed. In case of a non-nil error, the LSM
 // tree won't be updated, so there's no need for any rollback.
 func (txn *Txn) Commit() error {
-	txn.commitPrecheck() // Precheck before discarding txn.
-	defer txn.Discard()
-
 	if len(txn.writes) == 0 {
 		return nil // Nothing to do.
 	}
+
+	// Precheck before discarding txn.
+	if err := txn.commitPrecheck(); err != nil {
+		return err
+	}
+	defer txn.Discard()
 
 	txnCb, err := txn.commitAndSend()
 	if err != nil {
@@ -601,9 +605,6 @@ func runTxnCallback(cb *txnCb) {
 // so it is safe to increment sync.WaitGroup before calling CommitWith, and
 // decrementing it in the callback; to block until all callbacks are run.
 func (txn *Txn) CommitWith(cb func(error)) {
-	txn.commitPrecheck() // Precheck before discarding txn.
-	defer txn.Discard()
-
 	if cb == nil {
 		panic("Nil callback provided to CommitWith")
 	}
@@ -615,6 +616,13 @@ func (txn *Txn) CommitWith(cb func(error)) {
 		go runTxnCallback(&txnCb{user: cb, err: nil})
 		return
 	}
+
+	// Precheck before discarding txn.
+	if err := txn.commitPrecheck(); err != nil {
+		cb(err)
+		return
+	}
+	defer txn.Discard()
 
 	commitCb, err := txn.commitAndSend()
 	if err != nil {
