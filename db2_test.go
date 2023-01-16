@@ -29,13 +29,16 @@ import (
 	"path"
 	"regexp"
 	"runtime"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/dgraph-io/badger/options"
 	"github.com/dgraph-io/badger/pb"
 	"github.com/dgraph-io/badger/table"
 	"github.com/dgraph-io/badger/y"
-	"github.com/stretchr/testify/require"
 )
 
 func TestTruncateVlogWithClose(t *testing.T) {
@@ -522,12 +525,17 @@ func createTableWithRange(t *testing.T, db *DB, start, end int) *table.Table {
 //
 // The test has 3 steps
 // Step 1 - Create badger data. It is necessary that the value size is
-//          greater than valuethreshold. The value log file size after
-//          this step is around 170 bytes.
+//
+//	greater than valuethreshold. The value log file size after
+//	this step is around 170 bytes.
+//
 // Step 2 - Re-open the same badger and simulate a crash. The value log file
-//          size after this crash is around 2 GB (we increase the file size to mmap it).
+//
+//	size after this crash is around 2 GB (we increase the file size to mmap it).
+//
 // Step 3 - Re-open the same badger. We should be able to read all the data
-//          inserted in the first step.
+//
+//	inserted in the first step.
 func TestWindowsDataLoss(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("The test is only for Windows.")
@@ -551,7 +559,7 @@ func TestWindowsDataLoss(t *testing.T) {
 			v := []byte("barValuebarValuebarValuebarValuebarValue")
 			require.Greater(t, len(v), opt.ValueThreshold)
 
-			//32 bytes length and now it's not working
+			// 32 bytes length and now it's not working
 			err := txn.Set(key, v)
 			require.NoError(t, err)
 			keyList = append(keyList, key)
@@ -607,4 +615,59 @@ func TestWindowsDataLoss(t *testing.T) {
 		result = append(result, k)
 	}
 	require.ElementsMatch(t, keyList, result)
+}
+
+func TestDropAllDropPrefix(t *testing.T) {
+	key := func(i int) []byte {
+		return []byte(fmt.Sprintf("%10d", i))
+	}
+	val := func(i int) []byte {
+		return []byte(fmt.Sprintf("%128d", i))
+	}
+	runBadgerTest(t, nil, func(t *testing.T, db *DB) {
+		wb := db.NewWriteBatch()
+		defer wb.Cancel()
+
+		N := 50000
+
+		for i := 0; i < N; i++ {
+			require.NoError(t, wb.Set(key(i), val(i)))
+		}
+		require.NoError(t, wb.Flush())
+
+		var wg sync.WaitGroup
+		wg.Add(3)
+		go func() {
+			defer wg.Done()
+			err := db.DropPrefix([]byte("000"))
+			for err == ErrBlockedWrites {
+				fmt.Printf("DropPrefix 000 err: %v", err)
+				err = db.DropPrefix([]byte("000"))
+				time.Sleep(time.Millisecond * 500)
+			}
+			require.NoError(t, err)
+		}()
+		go func() {
+			defer wg.Done()
+			err := db.DropPrefix([]byte("111"))
+			for err == ErrBlockedWrites {
+				fmt.Printf("DropPrefix 111 err: %v", err)
+				err = db.DropPrefix([]byte("111"))
+				time.Sleep(time.Millisecond * 500)
+			}
+			require.NoError(t, err)
+		}()
+		go func() {
+			time.Sleep(time.Millisecond) // Let drop prefix run first.
+			defer wg.Done()
+			err := db.DropAll()
+			for err == ErrBlockedWrites {
+				fmt.Printf("dropAll err: %v", err)
+				err = db.DropAll()
+				time.Sleep(time.Millisecond * 300)
+			}
+			require.NoError(t, err)
+		}()
+		wg.Wait()
+	})
 }

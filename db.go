@@ -1343,13 +1343,16 @@ func (db *DB) Flatten(workers int) error {
 	}
 }
 
-func (db *DB) blockWrite() {
+func (db *DB) blockWrite() error {
 	// Stop accepting new writes.
-	atomic.StoreInt32(&db.blockWrites, 1)
+	if !atomic.CompareAndSwapInt32(&db.blockWrites, 0, 1) {
+		return ErrBlockedWrites
+	}
 
 	// Make all pending writes finish. The following will also close writeCh.
 	db.closers.writes.SignalAndWait()
 	db.opt.Infof("Writes flushed. Stopping compactions now...")
+	return nil
 }
 
 func (db *DB) unblockWrite() {
@@ -1360,14 +1363,16 @@ func (db *DB) unblockWrite() {
 	atomic.StoreInt32(&db.blockWrites, 0)
 }
 
-func (db *DB) prepareToDrop() func() {
+func (db *DB) prepareToDrop() (func(), error) {
 	if db.opt.ReadOnly {
 		panic("Attempting to drop data in read-only mode.")
 	}
 	// In order prepare for drop, we need to block the incoming writes and
 	// write it to db. Then, flush all the pending flushtask. So that, we
 	// don't miss any entries.
-	db.blockWrite()
+	if err := db.blockWrite(); err != nil {
+		return nil, err
+	}
 	reqs := make([]*request, 0, 10)
 	for {
 		select {
@@ -1382,7 +1387,7 @@ func (db *DB) prepareToDrop() func() {
 				db.opt.Infof("Resuming writes")
 				db.startMemoryFlush()
 				db.unblockWrite()
-			}
+			}, nil
 		}
 	}
 }
@@ -1408,7 +1413,10 @@ func (db *DB) DropAll() error {
 
 func (db *DB) dropAll() (func(), error) {
 	db.opt.Infof("DropAll called. Blocking writes...")
-	f := db.prepareToDrop()
+	f, err := db.prepareToDrop()
+	if err != nil {
+		return f, err
+	}
 	// prepareToDrop will stop all the incomming write and flushes any pending flush tasks.
 	// Before we drop, we'll stop the compaction because anyways all the datas are going to
 	// be deleted.
@@ -1458,7 +1466,10 @@ func (db *DB) dropAll() (func(), error) {
 //   - Resume memtable flushes, compactions and writes.
 func (db *DB) DropPrefix(prefixes ...[]byte) error {
 	db.opt.Infof("DropPrefix Called")
-	f := db.prepareToDrop()
+	f, err := db.prepareToDrop()
+	if err != nil {
+		return err
+	}
 	defer f()
 
 	filtered, err := db.filterPrefixesToDrop(prefixes)
