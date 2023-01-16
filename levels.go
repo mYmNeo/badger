@@ -19,6 +19,7 @@ package badger
 import (
 	"bytes"
 	"fmt"
+	"math"
 	"math/rand"
 	"os"
 	"sort"
@@ -309,9 +310,9 @@ func (s *levelsController) dropPrefixes(prefixes [][]byte) error {
 			}
 		}
 
-		for _, table := range l.tables {
-			if containsAnyPrefixes(table.Smallest(), table.Biggest(), prefixes) {
-				tableGroup = append(tableGroup, table)
+		for _, tb := range l.tables {
+			if containsAnyPrefixes(tb, prefixes) {
+				tableGroup = append(tableGroup, tb)
 			} else {
 				finishGroup()
 			}
@@ -711,24 +712,42 @@ func hasAnyPrefixes(s []byte, listOfPrefixes [][]byte) bool {
 	return false
 }
 
-func containsPrefix(smallValue, largeValue, prefix []byte) bool {
+func containsPrefix(table *table.Table, prefix []byte) bool {
+	smallValue := table.Smallest()
+	largeValue := table.Biggest()
 	if bytes.HasPrefix(smallValue, prefix) {
 		return true
 	}
 	if bytes.HasPrefix(largeValue, prefix) {
 		return true
 	}
+	isPresent := func() bool {
+		ti := table.NewIterator(false)
+		defer ti.Close()
+		// In table iterator's Seek, we assume that key has version in last 8 bytes. We set
+		// version=0 (ts=math.MaxUint64), so that we don't skip the key prefixed with prefix.
+		ti.Seek(y.KeyWithTs(prefix, math.MaxUint64))
+		if bytes.HasPrefix(ti.Key(), prefix) {
+			return true
+		}
+		return false
+	}
 	if bytes.Compare(prefix, smallValue) > 0 &&
 		bytes.Compare(prefix, largeValue) < 0 {
+		// There may be a case when table contains [0x0000,...., 0xffff]. If we are searching for
+		// k=0x0011, we should not directly infer that k is present. It may not be present.
+		if !isPresent() {
+			return false
+		}
 		return true
 	}
 
 	return false
 }
 
-func containsAnyPrefixes(smallValue, largeValue []byte, listOfPrefixes [][]byte) bool {
+func containsAnyPrefixes(table *table.Table, listOfPrefixes [][]byte) bool {
 	for _, prefix := range listOfPrefixes {
-		if containsPrefix(smallValue, largeValue, prefix) {
+		if containsPrefix(table, prefix) {
 			return true
 		}
 	}

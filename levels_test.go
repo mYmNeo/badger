@@ -17,9 +17,14 @@
 package badger
 
 import (
+	"fmt"
 	"math"
+	"math/rand"
+	"os"
+	"sort"
 	"testing"
 
+	"github.com/pkg/errors"
 	"github.com/stretchr/testify/require"
 
 	"github.com/dgraph-io/badger/options"
@@ -798,4 +803,51 @@ func TestLevelGet(t *testing.T) {
 
 		})
 	}
+}
+
+func TestTableContainsPrefix(t *testing.T) {
+	createTable := func(filename string, builder *table.Builder) (*table.Table, error) {
+		fd, err := y.CreateSyncedFile(filename, true)
+		if err != nil {
+			return nil, errors.Wrapf(err, "While opening new table: %s", filename)
+		}
+
+		if _, err := fd.Write(builder.Finish()); err != nil {
+			return nil, errors.Wrapf(err, "Unable to write to file: %s", filename)
+		}
+		newTbl, err := table.OpenTable(fd, options.LoadToRAM, nil)
+		// decrRef is added below.
+		return newTbl, errors.Wrapf(err, "Unable to open table: %q", fd.Name())
+	}
+	buildTable := func(keys []string) *table.Table {
+		filename := fmt.Sprintf("%s%s%d.sst", os.TempDir(), string(os.PathSeparator), rand.Uint32())
+		b := table.NewTableBuilder()
+		defer b.Close()
+
+		v := []byte("value")
+		sort.Slice(keys, func(i, j int) bool {
+			return keys[i] < keys[j]
+		})
+		for _, k := range keys {
+			b.Add(y.KeyWithTs([]byte(k), 1), y.ValueStruct{Value: v})
+			b.Add(y.KeyWithTs([]byte(k), 2), y.ValueStruct{Value: v})
+		}
+		tbl, err := createTable(filename, b)
+		require.NoError(t, err)
+		return tbl
+	}
+
+	tbl := buildTable([]string{"key1", "key3", "key31", "key32", "key4"})
+	defer tbl.DecrRef()
+
+	require.True(t, containsPrefix(tbl, []byte("key")))
+	require.True(t, containsPrefix(tbl, []byte("key1")))
+	require.True(t, containsPrefix(tbl, []byte("key3")))
+	require.True(t, containsPrefix(tbl, []byte("key32")))
+	require.True(t, containsPrefix(tbl, []byte("key4")))
+
+	require.False(t, containsPrefix(tbl, []byte("key0")))
+	require.False(t, containsPrefix(tbl, []byte("key2")))
+	require.False(t, containsPrefix(tbl, []byte("key323")))
+	require.False(t, containsPrefix(tbl, []byte("key5")))
 }
