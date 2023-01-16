@@ -28,8 +28,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dgraph-io/badger/pb"
 	"github.com/stretchr/testify/require"
+
+	"github.com/dgraph-io/badger/pb"
 )
 
 func TestBackupRestore1(t *testing.T) {
@@ -102,6 +103,7 @@ func TestBackupRestore1(t *testing.T) {
 			if err != nil {
 				return err
 			}
+			t.Logf("Got entry: %v\n", item.Version())
 			require.Equal(t, entries[count].key, item.Key())
 			require.Equal(t, entries[count].val, val)
 			require.Equal(t, entries[count].version, item.Version())
@@ -112,7 +114,7 @@ func TestBackupRestore1(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
-	require.Equal(t, db.orc.nextTs(), uint64(3))
+	require.Equal(t, 3, int(db.orc.nextTs()))
 }
 
 func TestBackupRestore2(t *testing.T) {

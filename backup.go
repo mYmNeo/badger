@@ -23,9 +23,10 @@ import (
 	"encoding/binary"
 	"io"
 
+	"github.com/golang/protobuf/proto"
+
 	"github.com/dgraph-io/badger/pb"
 	"github.com/dgraph-io/badger/y"
-	"github.com/golang/protobuf/proto"
 )
 
 // flushThreshold determines when a buffer will be flushed. When performing a
