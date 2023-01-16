@@ -339,6 +339,8 @@ outer:
 // are serial. In case any of these steps encounter an error, Orchestrate would stop execution and
 // return that error. Orchestrate can be called multiple times, but in serial order.
 func (st *Stream) Orchestrate(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	st.rangeCh = make(chan keyRange, 3) // Contains keys for posting lists.
 
 	// kvChan should only have a small capacity to ensure that we don't buffer up too much data if
@@ -373,7 +375,11 @@ func (st *Stream) Orchestrate(ctx context.Context) error {
 	kvErr := make(chan error, 1)
 	go func() {
 		// Picks up KV lists from kvChan, and sends them to Output.
-		kvErr <- st.streamKVs(ctx)
+		err := st.streamKVs(ctx)
+		if err != nil {
+			cancel() // Stop all the go routines.
+		}
+		kvErr <- err
 	}()
 	wg.Wait()        // Wait for produceKVs to be over.
 	close(st.kvChan) // Now we can close kvChan.
