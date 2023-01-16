@@ -26,10 +26,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/dgraph-io/badger/options"
 	"github.com/dgraph-io/badger/table"
 	"github.com/dgraph-io/badger/y"
-	"github.com/stretchr/testify/require"
 )
 
 type tableMock struct {
@@ -199,6 +200,32 @@ func TestIteratePrefix(t *testing.T) {
 	})
 }
 
+// Sanity test to verify the iterator does not crash the db in readonly mode if data does not exist.
+func TestIteratorReadOnlyWithNoData(t *testing.T) {
+	dir, err := ioutil.TempDir(".", "badger-test")
+	y.Check(err)
+	defer removeDir(dir)
+	opts := getTestOptions(dir)
+	db, err := Open(opts)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	opts.ReadOnly = true
+	db, err = Open(opts)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, db.Close())
+	}()
+
+	require.NoError(t, db.View(func(txn *Txn) error {
+		iopts := DefaultIteratorOptions
+		iopts.Prefix = []byte("xxx")
+		itr := txn.NewIterator(iopts)
+		defer itr.Close()
+		return nil
+	}))
+}
+
 // go test -v -run=XXX -bench=BenchmarkIterate -benchtime=3s
 // Benchmark with opt.Prefix set ===
 // goos: linux
@@ -206,12 +233,16 @@ func TestIteratePrefix(t *testing.T) {
 // pkg: github.com/dgraph-io/badger
 // BenchmarkIteratePrefixSingleKey/Key_lookups-4         	   10000	    365539 ns/op
 // --- BENCH: BenchmarkIteratePrefixSingleKey/Key_lookups-4
-// 	iterator_test.go:147: Inner b.N: 1
-// 	iterator_test.go:147: Inner b.N: 100
-// 	iterator_test.go:147: Inner b.N: 10000
+//
+//	iterator_test.go:147: Inner b.N: 1
+//	iterator_test.go:147: Inner b.N: 100
+//	iterator_test.go:147: Inner b.N: 10000
+//
 // --- BENCH: BenchmarkIteratePrefixSingleKey
-// 	iterator_test.go:143: LSM files: 79
-// 	iterator_test.go:145: Outer b.N: 1
+//
+//	iterator_test.go:143: LSM files: 79
+//	iterator_test.go:145: Outer b.N: 1
+//
 // PASS
 // ok  	github.com/dgraph-io/badger	41.586s
 //
@@ -221,12 +252,16 @@ func TestIteratePrefix(t *testing.T) {
 // pkg: github.com/dgraph-io/badger
 // BenchmarkIteratePrefixSingleKey/Key_lookups-4         	   10000	    460924 ns/op
 // --- BENCH: BenchmarkIteratePrefixSingleKey/Key_lookups-4
-// 	iterator_test.go:147: Inner b.N: 1
-// 	iterator_test.go:147: Inner b.N: 100
-// 	iterator_test.go:147: Inner b.N: 10000
+//
+//	iterator_test.go:147: Inner b.N: 1
+//	iterator_test.go:147: Inner b.N: 100
+//	iterator_test.go:147: Inner b.N: 10000
+//
 // --- BENCH: BenchmarkIteratePrefixSingleKey
-// 	iterator_test.go:143: LSM files: 83
-// 	iterator_test.go:145: Outer b.N: 1
+//
+//	iterator_test.go:143: LSM files: 83
+//	iterator_test.go:145: Outer b.N: 1
+//
 // PASS
 // ok  	github.com/dgraph-io/badger	41.836s
 //

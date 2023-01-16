@@ -494,6 +494,11 @@ func (it *Iterator) Close() {
 	}
 	it.closed = true
 
+	if it.iitr == nil {
+		atomic.AddInt32(&it.txn.numIterators, -1)
+		return
+	}
+
 	it.iitr.Close()
 	// It is important to wait for the fill goroutines to finish. Otherwise, we might leave zombie
 	// goroutines behind, which are waiting to acquire file read locks after DB has been closed.
@@ -515,6 +520,9 @@ func (it *Iterator) Close() {
 // Next would advance the iterator by one. Always check it.Valid() after a Next()
 // to ensure you have access to a valid it.Item().
 func (it *Iterator) Next() {
+	if it.iitr == nil {
+		return
+	}
 	// Reuse current item
 	it.item.wg.Wait() // Just cleaner to wait before pushing to avoid doing ref counting.
 	it.waste.push(it.item)
@@ -673,6 +681,9 @@ func (it *Iterator) prefetch() {
 // smallest key greater than the provided key if iterating in the forward direction.
 // Behavior would be reversed if iterating backwards.
 func (it *Iterator) Seek(key []byte) {
+	if it.iitr == nil {
+		return
+	}
 	for i := it.data.pop(); i != nil; i = it.data.pop() {
 		i.wg.Wait()
 		it.waste.push(i)
