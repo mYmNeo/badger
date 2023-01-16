@@ -621,6 +621,9 @@ nextTable:
 		s.kv.opt.Debugf("LOG Compact. Added %d keys. Skipped %d keys. Iteration took: %v",
 			numKeys, numSkips, time.Since(timeStart))
 		if builder.Empty() {
+			// Cleanup builder resources:
+			builder.Finish()
+			builder.Close()
 			continue
 		}
 		numBuilds++
