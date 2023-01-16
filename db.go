@@ -61,7 +61,7 @@ type closers struct {
 // DB provides the various functions required to interact with Badger.
 // DB is thread-safe.
 type DB struct {
-	sync.RWMutex // Guards list of inmemory tables, not individual reads and writes.
+	lock sync.RWMutex // Guards list of inmemory tables, not individual reads and writes.
 
 	dirLockGuard *directoryLockGuard
 	// nil if Dir and ValueDir are the same
@@ -395,8 +395,8 @@ func (db *DB) close() (err error) {
 		db.elog.Printf("Flushing memtable")
 		for {
 			pushedFlushTask := func() bool {
-				db.Lock()
-				defer db.Unlock()
+				db.lock.Lock()
+				defer db.lock.Unlock()
 				y.AssertTrue(db.mt != nil)
 				select {
 				case db.flushChan <- flushTask{mt: db.mt, vptr: db.vhead}:
@@ -488,8 +488,8 @@ func (db *DB) Sync() error {
 
 // getMemtables returns the current memtables and get references.
 func (db *DB) getMemTables() ([]*skl.Skiplist, func()) {
-	db.RLock()
-	defer db.RUnlock()
+	db.lock.RLock()
+	defer db.lock.RUnlock()
 
 	tables := make([]*skl.Skiplist, len(db.imm)+1)
 
@@ -660,9 +660,9 @@ func (db *DB) writeRequests(reqs []*request) error {
 			done(err)
 			return errors.Wrap(err, "writeRequests")
 		}
-		db.Lock()
+		db.lock.Lock()
 		db.updateHead(b.Ptrs)
-		db.Unlock()
+		db.lock.Unlock()
 	}
 	done(nil)
 	db.elog.Printf("%d entries written", count)
@@ -797,8 +797,8 @@ var errNoRoom = errors.New("No room for write")
 // ensureRoomForWrite is always called serially.
 func (db *DB) ensureRoomForWrite() error {
 	var err error
-	db.Lock()
-	defer db.Unlock()
+	db.lock.Lock()
+	defer db.lock.Unlock()
 
 	// Here we determine if we need to force flush memtable. Given we rotated log file, it would
 	// make sense to force flush a memtable, so the updated value head would have a chance to be
@@ -942,7 +942,7 @@ func (db *DB) flushMemtable(lc *y.Closer) error {
 			err := db.handleFlushTask(ft)
 			if err == nil {
 				// Update s.imm. Need a lock.
-				db.Lock()
+				db.lock.Lock()
 				// This is a single-threaded operation. ft.mt corresponds to the head of
 				// db.imm list. Once we flush it, we advance db.imm. The next ft.mt
 				// which would arrive here would match db.imm[0], because we acquire a
@@ -951,7 +951,7 @@ func (db *DB) flushMemtable(lc *y.Closer) error {
 				y.AssertTrue(ft.mt == db.imm[0])
 				db.imm = db.imm[1:]
 				ft.mt.DecrRef() // Return memory.
-				db.Unlock()
+				db.lock.Unlock()
 
 				break
 			}
@@ -1091,7 +1091,7 @@ func (db *DB) Size() (lsm, vlog int64) {
 
 // Sequence represents a Badger sequence.
 type Sequence struct {
-	sync.Mutex
+	lock      sync.Mutex
 	db        *DB
 	key       []byte
 	next      uint64
@@ -1102,8 +1102,8 @@ type Sequence struct {
 // Next would return the next integer in the sequence, updating the lease by running a transaction
 // if needed.
 func (seq *Sequence) Next() (uint64, error) {
-	seq.Lock()
-	defer seq.Unlock()
+	seq.lock.Lock()
+	defer seq.lock.Unlock()
 	if seq.next >= seq.leased {
 		if err := seq.updateLease(); err != nil {
 			return 0, err
@@ -1118,8 +1118,8 @@ func (seq *Sequence) Next() (uint64, error) {
 // before closing the associated DB. However it is valid to use the sequence after
 // it was released, causing a new lease with full bandwidth.
 func (seq *Sequence) Release() error {
-	seq.Lock()
-	defer seq.Unlock()
+	seq.lock.Lock()
+	defer seq.lock.Unlock()
 	err := seq.db.Update(func(txn *Txn) error {
 		item, err := txn.Get(seq.key)
 		if err != nil {
@@ -1418,8 +1418,8 @@ func (db *DB) dropAll() (func(), error) {
 		f()
 	}
 	// Block all foreign interactions with memory tables.
-	db.Lock()
-	defer db.Unlock()
+	db.lock.Lock()
+	defer db.lock.Unlock()
 
 	// Remove inmemory tables. Calling DecrRef for safety. Not sure if they're absolutely needed.
 	db.mt.DecrRef()
@@ -1472,8 +1472,8 @@ func (db *DB) DropPrefix(prefixes ...[]byte) error {
 	}
 
 	// Block all foreign interactions with memory tables.
-	db.Lock()
-	defer db.Unlock()
+	db.lock.Lock()
+	defer db.lock.Unlock()
 
 	db.imm = append(db.imm, db.mt)
 	for _, memtable := range db.imm {

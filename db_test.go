@@ -1861,11 +1861,11 @@ func TestNoCrash(t *testing.T) {
 		require.NoError(t, err, "update to db failed")
 	}
 
-	db.Lock()
+	db.lock.Lock()
 	// make head to point to second file. We cannot make it point to the first
 	// vlog file because we cannot push a zero head pointer.
 	db.vhead = valuePointer{1, 0, 0}
-	db.Unlock()
+	db.lock.Unlock()
 	db.Close()
 
 	// reduce size of SSTable to flush early
@@ -1899,14 +1899,14 @@ func TestForceFlushMemtable(t *testing.T) {
 	// We want to make sure that memtable is flushed on disk. While flushing memtable to disk,
 	// latest head is also stored in it. Hence we will try to read head from disk. To make sure
 	// this. we will truncate all memtables.
-	db.Lock()
+	db.lock.Lock()
 	db.mt.DecrRef()
 	for _, mt := range db.imm {
 		mt.DecrRef()
 	}
 	db.imm = db.imm[:0]
 	db.mt = skl.NewSkiplist(arenaSize(db.opt)) // Set it up for future writes.
-	db.Unlock()
+	db.lock.Unlock()
 
 	// get latest value of value log head
 	headKey := y.KeyWithTs(head, math.MaxUint64)
