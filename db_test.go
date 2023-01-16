@@ -37,8 +37,9 @@ import (
 	"github.com/dgraph-io/badger/pb"
 	"github.com/dgraph-io/badger/skl"
 
-	"github.com/dgraph-io/badger/y"
 	"github.com/stretchr/testify/require"
+
+	"github.com/dgraph-io/badger/y"
 )
 
 var mmap = flag.Bool("vlog_mmap", true, "Specify if value log must be memory-mapped")
@@ -1916,6 +1917,35 @@ func TestForceFlushMemtable(t *testing.T) {
 	// Since we are inserting 3 entries and ValueLogMaxEntries is 1, there will be 3 rotation. For
 	// 1st and 2nd time head flushed with memtable will have fid as 0 and last time it will be 1.
 	require.True(t, vptr.Fid == 1, fmt.Sprintf("expected fid: %d, actual fid: %d", 1, vptr.Fid))
+}
+
+func TestCompactL0OnClose(t *testing.T) {
+	opt := getTestOptions("")
+	opt.CompactL0OnClose = true
+	opt.ValueThreshold = 1 // Every value goes to value log
+	opt.NumVersionsToKeep = 1
+	runBadgerTest(t, &opt, func(t *testing.T, db *DB) {
+		var keys [][]byte
+		val := make([]byte, 1<<12)
+		for i := 0; i < 10; i++ {
+			key := make([]byte, 40)
+			_, err := rand.Read(key)
+			require.NoError(t, err)
+			keys = append(keys, key)
+
+			err = db.Update(func(txn *Txn) error {
+				return txn.SetEntry(NewEntry(key, val))
+			})
+			require.NoError(t, err)
+		}
+
+		for _, key := range keys {
+			err := db.Update(func(txn *Txn) error {
+				return txn.SetEntry(NewEntry(key, val))
+			})
+			require.NoError(t, err)
+		}
+	})
 }
 
 func TestMain(m *testing.M) {
