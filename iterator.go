@@ -684,6 +684,9 @@ func (it *Iterator) Seek(key []byte) {
 	if it.iitr == nil {
 		return
 	}
+	if len(key) > 0 {
+		it.txn.addReadKey(key)
+	}
 	for i := it.data.pop(); i != nil; i = it.data.pop() {
 		i.wg.Wait()
 		it.waste.push(i)
