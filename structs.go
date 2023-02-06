@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -99,6 +100,18 @@ func (e *Entry) estimateSize(threshold int) int {
 	return len(e.Key) + vptrSize + 2 // 12 for ValuePointer, 2 for metas.
 }
 
+var headerPool = sync.Pool{
+	New: func() interface{} {
+		return make([]byte, headerBufSize)
+	},
+}
+
+var crcPool = sync.Pool{
+	New: func() interface{} {
+		return make([]byte, crc32.Size)
+	},
+}
+
 // Encodes e to buf. Returns number of bytes written.
 func encodeEntry(e *Entry, buf *bytes.Buffer) (int, error) {
 	h := header{
@@ -109,13 +122,15 @@ func encodeEntry(e *Entry, buf *bytes.Buffer) (int, error) {
 		userMeta:  e.UserMeta,
 	}
 
-	var headerEnc [headerBufSize]byte
-	h.Encode(headerEnc[:])
+	headerEnc := headerPool.Get().([]byte)
+	defer headerPool.Put(headerEnc)
+
+	h.Encode(headerEnc)
 
 	hash := crc32.New(y.CastagnoliCrcTable)
 
-	buf.Write(headerEnc[:])
-	if _, err := hash.Write(headerEnc[:]); err != nil {
+	buf.Write(headerEnc)
+	if _, err := hash.Write(headerEnc); err != nil {
 		return 0, err
 	}
 
@@ -129,9 +144,11 @@ func encodeEntry(e *Entry, buf *bytes.Buffer) (int, error) {
 		return 0, err
 	}
 
-	var crcBuf [crc32.Size]byte
-	binary.BigEndian.PutUint32(crcBuf[:], hash.Sum32())
-	buf.Write(crcBuf[:])
+	crcBuf := crcPool.Get().([]byte)
+	defer crcPool.Put(crcBuf)
+
+	binary.BigEndian.PutUint32(crcBuf, hash.Sum32())
+	buf.Write(crcBuf)
 
 	return len(headerEnc) + len(e.Key) + len(e.Value) + len(crcBuf), nil
 }
