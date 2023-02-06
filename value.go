@@ -624,6 +624,9 @@ type lfDiscardStats struct {
 }
 
 type valueLog struct {
+	poolOnce        sync.Once
+	valueBufferPool sync.Pool
+
 	dirPath string
 	elog    trace.EventLog
 
@@ -787,6 +790,13 @@ func (vlog *valueLog) init(db *DB) {
 		closer:    y.NewCloser(1),
 		flushChan: make(chan map[uint32]int64, 16),
 	}
+	vlog.poolOnce.Do(func() {
+		vlog.valueBufferPool = sync.Pool{
+			New: func() interface{} {
+				return bytes.NewBuffer(make([]byte, 0, 4<<20))
+			},
+		}
+	})
 }
 
 func (vlog *valueLog) open(db *DB, ptr valuePointer, replayFn logEntry) error {
@@ -1055,7 +1065,9 @@ func (vlog *valueLog) write(reqs []*request) error {
 	curlf := vlog.filesMap[maxFid]
 	vlog.filesLock.RUnlock()
 
-	var buf bytes.Buffer
+	buf := vlog.valueBufferPool.Get().(*bytes.Buffer)
+	defer vlog.valueBufferPool.Put(buf)
+	buf.Reset()
 	flushWrites := func() error {
 		if buf.Len() == 0 {
 			return nil
@@ -1110,7 +1122,7 @@ func (vlog *valueLog) write(reqs []*request) error {
 			p.Fid = curlf.fid
 			// Use the offset including buffer length so far.
 			p.Offset = vlog.woffset() + uint32(buf.Len())
-			plen, err := encodeEntry(e, &buf) // Now encode the entry into buffer.
+			plen, err := encodeEntry(e, buf) // Now encode the entry into buffer.
 			if err != nil {
 				return err
 			}
