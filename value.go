@@ -511,19 +511,16 @@ func (vlog *valueLog) rewrite(f *logFile, tr trace.Trace) error {
 	var deleteFileNow bool
 	// Entries written to LSM. Remove the older file now.
 	{
-		vlog.filesLock.Lock()
 		// Just a sanity-check.
-		if _, ok := vlog.filesMap[f.fid]; !ok {
-			vlog.filesLock.Unlock()
+		if _, ok := vlog.filesMap.Load(f.fid); !ok {
 			return errors.Errorf("Unable to find fid: %d", f.fid)
 		}
 		if vlog.iteratorCount() == 0 {
-			delete(vlog.filesMap, f.fid)
+			vlog.filesMap.Delete(f.fid)
 			deleteFileNow = true
 		} else {
-			vlog.filesToBeDeleted = append(vlog.filesToBeDeleted, f.fid)
+			vlog.filesToBeDeleted.Store(f.fid, struct{}{})
 		}
-		vlog.filesLock.Unlock()
 	}
 
 	if deleteFileNow {
@@ -549,14 +546,15 @@ func (vlog *valueLog) decrIteratorCount() error {
 		return nil
 	}
 
-	vlog.filesLock.Lock()
-	lfs := make([]*logFile, 0, len(vlog.filesToBeDeleted))
-	for _, id := range vlog.filesToBeDeleted {
-		lfs = append(lfs, vlog.filesMap[id])
-		delete(vlog.filesMap, id)
-	}
-	vlog.filesToBeDeleted = nil
-	vlog.filesLock.Unlock()
+	lfs := make([]*logFile, 0)
+	vlog.filesToBeDeleted.Range(func(fid, _ interface{}) bool {
+		v, ok := vlog.filesMap.LoadAndDelete(fid)
+		if ok {
+			lfs = append(lfs, v.(*logFile))
+		}
+		vlog.filesToBeDeleted.Delete(fid)
+		return true
+	})
 
 	for _, lf := range lfs {
 		if err := vlog.deleteLogFile(lf); err != nil {
@@ -590,16 +588,16 @@ func (vlog *valueLog) dropAll() (int, error) {
 	// count.
 	var count int
 	deleteAll := func() error {
-		vlog.filesLock.Lock()
-		defer vlog.filesLock.Unlock()
-		for _, lf := range vlog.filesMap {
-			if err := vlog.deleteLogFile(lf); err != nil {
-				return err
+		var err error
+		vlog.filesMap.Range(func(key, value any) bool {
+			if err = vlog.deleteLogFile(value.(*logFile)); err != nil {
+				return false
 			}
 			count++
-		}
-		vlog.filesMap = make(map[uint32]*logFile)
-		return nil
+			vlog.filesMap.Delete(key)
+			return true
+		})
+		return err
 	}
 	if err := deleteAll(); err != nil {
 		return count, err
@@ -631,9 +629,8 @@ type valueLog struct {
 	elog    trace.EventLog
 
 	// guards our view of which files exist, which to be deleted, how many active iterators
-	filesLock        sync.RWMutex
-	filesMap         map[uint32]*logFile
-	filesToBeDeleted []uint32
+	filesMap         sync.Map
+	filesToBeDeleted sync.Map
 	// A refcount of iterators -- when this hits zero, we can delete the filesToBeDeleted.
 	numActiveIterators int32
 
@@ -656,8 +653,6 @@ func (vlog *valueLog) fpath(fid uint32) string {
 }
 
 func (vlog *valueLog) populateFilesMap() error {
-	vlog.filesMap = make(map[uint32]*logFile)
-
 	files, err := ioutil.ReadDir(vlog.dirPath)
 	if err != nil {
 		return errFile(err, vlog.dirPath, "Unable to open log dir.")
@@ -683,9 +678,11 @@ func (vlog *valueLog) populateFilesMap() error {
 			path:        vlog.fpath(uint32(fid)),
 			loadingMode: vlog.opt.ValueLogLoadingMode,
 		}
-		vlog.filesMap[uint32(fid)] = lf
-		if vlog.maxFid < uint32(fid) {
-			vlog.maxFid = uint32(fid)
+		vlog.filesMap.Store(uint32(fid), lf)
+		for maxFid := atomic.LoadUint32(&vlog.maxFid); maxFid < uint32(fid); maxFid = atomic.LoadUint32(&vlog.maxFid) {
+			if atomic.CompareAndSwapUint32(&vlog.maxFid, maxFid, uint32(fid)) {
+				break
+			}
 		}
 	}
 	return nil
@@ -727,9 +724,7 @@ func (vlog *valueLog) createVlogFile(fid uint32) (*logFile, error) {
 		return nil, errFile(err, lf.path, "Mmap value log file")
 	}
 
-	vlog.filesLock.Lock()
-	vlog.filesMap[fid] = lf
-	vlog.filesLock.Unlock()
+	vlog.filesMap.Store(fid, lf)
 
 	return lf, nil
 }
@@ -805,15 +800,22 @@ func (vlog *valueLog) open(db *DB, ptr valuePointer, replayFn logEntry) error {
 		return err
 	}
 	// If no files are found, then create a new file.
-	if len(vlog.filesMap) == 0 {
+	count := 0
+	vlog.filesMap.Range(func(k, v interface{}) bool {
+		count++
+		return true
+	})
+	if count == 0 {
 		_, err := vlog.createVlogFile(0)
 		return err
 	}
 
 	fids := vlog.sortedFids()
 	for _, fid := range fids {
-		lf, ok := vlog.filesMap[fid]
+		v, ok := vlog.filesMap.Load(fid)
 		y.AssertTrue(ok)
+		lf := v.(*logFile)
+
 		var flags uint32
 		switch {
 		case vlog.opt.ReadOnly:
@@ -850,7 +852,7 @@ func (vlog *valueLog) open(db *DB, ptr valuePointer, replayFn logEntry) error {
 		if err := vlog.replayLog(lf, offset, replayFn); err != nil {
 			// Log file is corrupted. Delete it.
 			if err == errDeleteVlogFile {
-				delete(vlog.filesMap, fid)
+				vlog.filesMap.Delete(fid)
 				// Close the fd of the file before deleting the file otherwise windows complaints.
 				if err := lf.fd.Close(); err != nil {
 					return errors.Wrapf(err, "failed to close vlog file %s", lf.fd.Name())
@@ -874,8 +876,9 @@ func (vlog *valueLog) open(db *DB, ptr valuePointer, replayFn logEntry) error {
 	}
 
 	// Seek to the end to start writing.
-	last, ok := vlog.filesMap[vlog.maxFid]
+	v, ok := vlog.filesMap.Load(vlog.maxFid)
 	y.AssertTrue(ok)
+	last := v.(*logFile)
 	lastOffset, err := last.fd.Seek(0, io.SeekEnd)
 	if err != nil {
 		return errFile(err, last.path, "file.Seek to end")
@@ -927,7 +930,10 @@ func (vlog *valueLog) Close() error {
 	defer vlog.elog.Finish()
 
 	var err error
-	for id, f := range vlog.filesMap {
+	vlog.filesMap.Range(func(k, v interface{}) bool {
+		id := k.(uint32)
+		f := v.(*logFile)
+
 		f.lock.Lock() // We won’t release the lock.
 		if munmapErr := f.munmap(); munmapErr != nil && err == nil {
 			err = munmapErr
@@ -945,23 +951,24 @@ func (vlog *valueLog) Close() error {
 		if closeErr := f.fd.Close(); closeErr != nil && err == nil {
 			err = closeErr
 		}
-	}
+
+		return true
+	})
+
 	return err
 }
 
 // sortedFids returns the file id's not pending deletion, sorted.  Assumes we have shared access to
 // filesMap.
 func (vlog *valueLog) sortedFids() []uint32 {
-	toBeDeleted := make(map[uint32]struct{})
-	for _, fid := range vlog.filesToBeDeleted {
-		toBeDeleted[fid] = struct{}{}
-	}
-	ret := make([]uint32, 0, len(vlog.filesMap))
-	for fid := range vlog.filesMap {
-		if _, ok := toBeDeleted[fid]; !ok {
+	ret := make([]uint32, 0)
+	vlog.filesMap.Range(func(key, value interface{}) bool {
+		fid := key.(uint32)
+		if _, ok := vlog.filesToBeDeleted.Load(fid); !ok {
 			ret = append(ret, fid)
 		}
-	}
+		return true
+	})
 	sort.Slice(ret, func(i, j int) bool {
 		return ret[i] < ret[j]
 	})
@@ -1030,25 +1037,35 @@ func (vlog *valueLog) sync(fid uint32) error {
 		return nil
 	}
 
-	vlog.filesLock.RLock()
 	maxFid := atomic.LoadUint32(&vlog.maxFid)
 	// During replay it is possible to get sync call with fid less than maxFid.
 	// Because older file has already been synced, we can return from here.
-	if fid < maxFid || len(vlog.filesMap) == 0 {
-		vlog.filesLock.RUnlock()
+	if fid < maxFid {
 		return nil
 	}
-	curlf := vlog.filesMap[maxFid]
+
+	count := 0
+	vlog.filesMap.Range(func(key, value any) bool {
+		count++
+		return true
+	})
+
+	if count == 0 {
+		return nil
+	}
+
+	v, ok := vlog.filesMap.Load(maxFid)
+	if !ok {
+		return nil
+	}
+	curlf := v.(*logFile)
 	// Sometimes it is possible that vlog.maxFid has been increased but file creation
 	// with same id is still in progress and this function is called. In those cases
 	// entry for the file might not be present in vlog.filesMap.
 	if curlf == nil {
-		vlog.filesLock.RUnlock()
 		return nil
 	}
 	curlf.lock.RLock()
-	vlog.filesLock.RUnlock()
-
 	err := curlf.sync()
 	curlf.lock.RUnlock()
 	return err
@@ -1060,10 +1077,12 @@ func (vlog *valueLog) woffset() uint32 {
 
 // write is thread-unsafe by design and should not be called concurrently.
 func (vlog *valueLog) write(reqs []*request) error {
-	vlog.filesLock.RLock()
 	maxFid := atomic.LoadUint32(&vlog.maxFid)
-	curlf := vlog.filesMap[maxFid]
-	vlog.filesLock.RUnlock()
+	v, ok := vlog.filesMap.Load(maxFid)
+	if !ok {
+		return nil
+	}
+	curlf := v.(*logFile)
 
 	buf := vlog.valueBufferPool.Get().(*bytes.Buffer)
 	defer vlog.valueBufferPool.Put(buf)
@@ -1158,13 +1177,12 @@ func (vlog *valueLog) write(reqs []*request) error {
 // Gets the logFile and acquires and RLock() for the mmap. You must call RUnlock on the file
 // (if non-nil)
 func (vlog *valueLog) getFileRLocked(fid uint32) (*logFile, error) {
-	vlog.filesLock.RLock()
-	defer vlog.filesLock.RUnlock()
-	ret, ok := vlog.filesMap[fid]
+	v, ok := vlog.filesMap.Load(fid)
 	if !ok {
 		// log file has gone away, we can't do anything. Return.
 		return nil, errors.Errorf("file with ID: %d not found", fid)
 	}
+	ret := v.(*logFile)
 	ret.lock.RLock()
 	return ret, nil
 }
@@ -1236,8 +1254,6 @@ func valueBytesToEntry(buf []byte) (e Entry) {
 }
 
 func (vlog *valueLog) pickLog(head valuePointer, tr trace.Trace) (files []*logFile) {
-	vlog.filesLock.RLock()
-	defer vlog.filesLock.RUnlock()
 	fids := vlog.sortedFids()
 	if len(fids) <= 1 {
 		tr.LazyPrintf("Only one or less value log file.")
@@ -1266,7 +1282,10 @@ func (vlog *valueLog) pickLog(head valuePointer, tr trace.Trace) (files []*logFi
 
 	if candidate.fid != math.MaxUint32 { // Found a candidate
 		tr.LazyPrintf("Found candidate via discard stats: %v", candidate)
-		files = append(files, vlog.filesMap[candidate.fid])
+		v, ok := vlog.filesMap.Load(candidate.fid)
+		if ok {
+			files = append(files, v.(*logFile))
+		}
 	} else {
 		tr.LazyPrintf("Could not find candidate via discard stats. Randomly picking one.")
 	}
@@ -1288,7 +1307,10 @@ func (vlog *valueLog) pickLog(head valuePointer, tr trace.Trace) (files []*logFi
 		idx = rand.Intn(idx + 1) // Another level of rand to favor smaller fids.
 	}
 	tr.LazyPrintf("Randomly chose fid: %d", fids[idx])
-	files = append(files, vlog.filesMap[fids[idx]])
+	v, ok := vlog.filesMap.Load(fids[idx])
+	if ok {
+		files = append(files, v.(*logFile))
+	}
 	return files
 }
 
