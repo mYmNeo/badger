@@ -68,8 +68,8 @@ type WaterMark struct {
 }
 
 // Init initializes a WaterMark struct. MUST be called before using it.
-func (w *WaterMark) Init(closer *Closer, eventLogging bool) {
-	w.markCh = make(chan mark, 100)
+func (w *WaterMark) Init(closer *Closer, eventLogging bool, markSize int) {
+	w.markCh = make(chan mark, markSize)
 	if eventLogging {
 		w.elog = trace.NewEventLog("Watermark", w.Name)
 	} else {
