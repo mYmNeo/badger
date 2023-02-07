@@ -203,7 +203,7 @@ func (b *Builder) blockIndex() []byte {
 
 // Finish finishes the table by appending the index.
 func (b *Builder) Finish() []byte {
-	bf := bbloom.New(float64(b.keyCount), 0.01)
+	bf := bbloom.New(float64(b.keyCount), 0.001)
 	var klen [2]byte
 	key := make([]byte, 1024)
 	for {
