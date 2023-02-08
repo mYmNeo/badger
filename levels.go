@@ -534,9 +534,10 @@ nextTable:
 
 	var numBuilds, numVersions int
 	var lastKey, skipKey []byte
+	tableSize := s.kv.opt.MaxTableSize
 	for it.Valid() {
 		timeStart := time.Now()
-		builder := table.NewTableBuilder()
+		builder := table.NewTableBuilder(tableSize)
 		var numKeys, numSkips uint64
 		for ; it.Valid(); it.Next() {
 			// See if we need to skip the prefix.
@@ -558,7 +559,7 @@ nextTable:
 			}
 
 			if !y.SameKey(it.Key(), lastKey) {
-				if builder.ReachedCapacity(s.kv.opt.MaxTableSize) {
+				if builder.ReachedCapacity() {
 					// Only break if we are on a different key, and have reached capacity. We want
 					// to ensure that all versions of the key are stored in the same sstable, and
 					// not divided across multiple tables at the same level.

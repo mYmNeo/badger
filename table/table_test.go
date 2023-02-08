@@ -26,9 +26,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/dgraph-io/badger/options"
 	"github.com/dgraph-io/badger/y"
-	"github.com/stretchr/testify/require"
 )
 
 func key(prefix string, i int) string {
@@ -48,7 +49,7 @@ func buildTestTable(t *testing.T, prefix string, n int) *os.File {
 
 // keyValues is n by 2 where n is number of pairs.
 func buildTable(t *testing.T, keyValues [][]string) *os.File {
-	b := NewTableBuilder()
+	b := NewTableBuilder(1 << 20)
 	defer b.Close()
 	// TODO: Add test for file garbage collection here. No files should be left after the tests here.
 
@@ -681,7 +682,8 @@ func BenchmarkReadAndBuild(b *testing.B) {
 	// Iterate b.N times over the entire table.
 	for i := 0; i < b.N; i++ {
 		func() {
-			newBuilder := NewTableBuilder()
+			newBuilder := NewTableBuilder(1 << 20)
+			defer newBuilder.Close()
 			it := tbl.NewIterator(false)
 			defer it.Close()
 			for it.seekToFirst(); it.Valid(); it.next() {
@@ -701,7 +703,7 @@ func BenchmarkReadMerged(b *testing.B) {
 	var tables []*Table
 	for i := 0; i < m; i++ {
 		filename := fmt.Sprintf("%s%s%d.sst", os.TempDir(), string(os.PathSeparator), rand.Int63())
-		builder := NewTableBuilder()
+		builder := NewTableBuilder(int64(tableSize))
 		f, err := y.OpenSyncedFile(filename, true)
 		y.Check(err)
 		for j := 0; j < tableSize; j++ {
@@ -712,6 +714,7 @@ func BenchmarkReadMerged(b *testing.B) {
 			builder.Add([]byte(k), y.ValueStruct{Value: []byte(v), Meta: 123, UserMeta: 0})
 		}
 		f.Write(builder.Finish())
+		builder.Close()
 		tbl, err := OpenTable(f, options.LoadToRAM, nil)
 		y.Check(err)
 		tables = append(tables, tbl)
@@ -763,7 +766,8 @@ func BenchmarkRandomRead(b *testing.B) {
 
 func getTableForBenchmarks(b *testing.B, count int) *Table {
 	rand.Seed(time.Now().Unix())
-	builder := NewTableBuilder()
+	builder := NewTableBuilder(1 << 20)
+	defer builder.Close()
 	filename := fmt.Sprintf("%s%s%d.sst", os.TempDir(), string(os.PathSeparator), rand.Int63())
 	f, err := y.OpenSyncedFile(filename, true)
 	require.NoError(b, err)

@@ -272,7 +272,7 @@ func (sw *StreamWriter) newWriter(streamId uint32) *sortedWriter {
 		db:       sw.db,
 		streamId: streamId,
 		throttle: sw.throttle,
-		builder:  table.NewTableBuilder(),
+		builder:  table.NewTableBuilder(sw.db.opt.MaxTableSize),
 		reqCh:    make(chan *request, 3),
 		closer:   y.NewCloser(1),
 	}
@@ -339,7 +339,7 @@ func (w *sortedWriter) Add(key []byte, vs y.ValueStruct) error {
 
 	sameKey := y.SameKey(key, w.lastKey)
 	// Same keys should go into the same SSTable.
-	if !sameKey && w.builder.ReachedCapacity(w.db.opt.MaxTableSize) {
+	if !sameKey && w.builder.ReachedCapacity() {
 		if err := w.send(false); err != nil {
 			return err
 		}
@@ -359,7 +359,7 @@ func (w *sortedWriter) send(done bool) error {
 		err := w.createTable(data)
 		w.throttle.Done(err)
 	}(w.builder)
-	w.builder = table.NewTableBuilder()
+	w.builder = table.NewTableBuilder(w.db.opt.MaxTableSize)
 	return nil
 }
 
@@ -367,6 +367,7 @@ func (w *sortedWriter) send(done bool) error {
 // to sortedWriter. It completes writing current SST to disk.
 func (w *sortedWriter) Done() error {
 	if w.builder.Empty() {
+		w.builder.Close()
 		// Assign builder as nil, so that underlying memory can be garbage collected.
 		w.builder = nil
 		return nil

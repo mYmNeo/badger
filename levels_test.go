@@ -35,7 +35,8 @@ import (
 
 // createAndOpen creates a table with the given data and adds it to the given level.
 func createAndOpen(db *DB, td []keyValVersion, level int) {
-	b := table.NewTableBuilder()
+	b := table.NewTableBuilder(db.opt.MaxTableSize)
+	defer b.Close()
 
 	// Add all keys and versions to the table.
 	for _, item := range td {
@@ -821,7 +822,7 @@ func TestTableContainsPrefix(t *testing.T) {
 	}
 	buildTable := func(keys []string) *table.Table {
 		filename := fmt.Sprintf("%s%s%d.sst", os.TempDir(), string(os.PathSeparator), rand.Uint32())
-		b := table.NewTableBuilder()
+		b := table.NewTableBuilder(1 << 20)
 		defer b.Close()
 
 		v := []byte("value")
