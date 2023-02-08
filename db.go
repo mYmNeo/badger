@@ -92,10 +92,6 @@ type DB struct {
 	pub *publisher
 }
 
-const (
-	kvWriteChCapacity = 1000
-)
-
 func (db *DB) replayFunction() func(Entry, valuePointer) error {
 	type txnEntry struct {
 		nk []byte
@@ -282,7 +278,7 @@ func Open(opt Options) (db *DB, err error) {
 	db = &DB{
 		imm:           make([]*skl.Skiplist, 0, opt.NumMemtables),
 		flushChan:     make(chan flushTask, opt.NumMemtables),
-		writeCh:       make(chan *request, kvWriteChCapacity),
+		writeCh:       make(chan *request, opt.KVWriteCapacity),
 		opt:           opt,
 		manifest:      manifestFile,
 		elog:          elog,
@@ -344,7 +340,7 @@ func Open(opt Options) (db *DB, err error) {
 	db.orc.readMark.Done(db.orc.nextTxnTs)
 	db.orc.incrementNextTs()
 
-	db.writeCh = make(chan *request, kvWriteChCapacity)
+	db.writeCh = make(chan *request, opt.KVWriteCapacity)
 	db.closers.writes = y.NewCloser(1)
 	go db.doWrites(db.closers.writes)
 
@@ -710,6 +706,7 @@ func (db *DB) doWrites(lc *y.Closer) {
 	reqLen := new(expvar.Int)
 	y.PendingWrites.Set(db.opt.Dir, reqLen)
 
+	writeCapacity := 3 * db.opt.KVWriteCapacity
 	reqs := make([]*request, 0, 10)
 	for {
 		var r *request
@@ -723,7 +720,7 @@ func (db *DB) doWrites(lc *y.Closer) {
 			reqs = append(reqs, r)
 			reqLen.Set(int64(len(reqs)))
 
-			if len(reqs) >= 3*kvWriteChCapacity {
+			if len(reqs) >= writeCapacity {
 				pendingCh <- struct{}{} // blocking.
 				goto writeCase
 			}
