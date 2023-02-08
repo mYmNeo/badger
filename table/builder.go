@@ -21,6 +21,7 @@ import (
 	"encoding/binary"
 	"io"
 	"math"
+	"sync"
 	"unsafe"
 
 	"github.com/AndreasBriese/bbloom"
@@ -31,12 +32,6 @@ import (
 var (
 	restartInterval = 100 // Might want to change this to be based on total size instead of numKeys.
 )
-
-func newBuffer(sz int) *bytes.Buffer {
-	b := new(bytes.Buffer)
-	b.Grow(sz)
-	return b
-}
 
 const headerSize = int(unsafe.Sizeof(header{}))
 
@@ -68,7 +63,8 @@ func (h header) Size() int { return headerSize }
 
 // Builder is used in building a table.
 type Builder struct {
-	counter int // Number of keys written for the current block.
+	tableSize int64
+	counter   int // Number of keys written for the current block.
 
 	// Typically tens or hundreds of meg. This is for one single file.
 	buf *bytes.Buffer
@@ -85,17 +81,47 @@ type Builder struct {
 	keyCount int
 }
 
+const maxAllocatorInitialSz = 256 << 20
+
+var (
+	tableBufferPool sync.Pool
+	tableInit       sync.Once
+)
+
 // NewTableBuilder makes a new TableBuilder.
-func NewTableBuilder() *Builder {
+func NewTableBuilder(tableSize int64) *Builder {
+	sz := int(tableSize)
+	if sz > maxAllocatorInitialSz {
+		sz = maxAllocatorInitialSz
+	}
+
+	tableInit.Do(func() {
+		tableBufferPool = sync.Pool{
+			New: func() interface{} {
+				return bytes.NewBuffer(make([]byte, 0, sz))
+			},
+		}
+	})
+
+	keyBuf := tableBufferPool.Get().(*bytes.Buffer)
+	buf := tableBufferPool.Get().(*bytes.Buffer)
+
 	return &Builder{
-		keyBuf:     newBuffer(1 << 20),
-		buf:        newBuffer(1 << 20),
+		tableSize:  tableSize,
+		keyBuf:     keyBuf,
+		buf:        buf,
 		prevOffset: math.MaxUint32, // Used for the first element!
 	}
 }
 
 // Close closes the TableBuilder.
-func (b *Builder) Close() {}
+func (b *Builder) Close() {
+	b.keyBuf.Reset()
+	tableBufferPool.Put(b.keyBuf)
+
+	b.buf.Reset()
+	tableBufferPool.Put(b.buf)
+}
 
 // Empty returns whether it's empty.
 func (b *Builder) Empty() bool { return b.buf.Len() == 0 }
@@ -177,10 +203,10 @@ func (b *Builder) Add(key []byte, value y.ValueStruct) {
 // at the end. The diff can vary.
 
 // ReachedCapacity returns true if we... roughly (?) reached capacity?
-func (b *Builder) ReachedCapacity(cap int64) bool {
+func (b *Builder) ReachedCapacity() bool {
 	estimateSz := b.buf.Len() + 8 /* empty header */ + 4*len(b.restarts) +
 		8 /* 8 = end of buf offset + len(restarts) */
-	return int64(estimateSz) > cap
+	return int64(estimateSz) > int64(float64(b.tableSize)*0.95)
 }
 
 // blockIndex generates the block index for the table.
