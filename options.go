@@ -72,6 +72,9 @@ type Options struct {
 	// the same directory. Use this options with caution.
 	BypassLockGuard bool
 
+	// KVWriteCapacity defines the capacity channel size for write
+	KVWriteCapacity int
+
 	// Transaction start and commit timestamps are managed by end-user.
 	// This is only useful for databases built on top of Badger (like Dgraph).
 	// Not recommended for most users.
@@ -118,6 +121,7 @@ func DefaultOptions(path string) Options {
 		Logger:             defaultLogger,
 		EventLogging:       true,
 		LogRotatesToFlush:  2,
+		KVWriteCapacity:    1000,
 	}
 }
 
@@ -417,5 +421,13 @@ func (opt Options) WithVerifyValueChecksum(val bool) Options {
 // The default value of BypassLockGuard is false.
 func (opt Options) WithBypassLockGuard(b bool) Options {
 	opt.BypassLockGuard = b
+	return opt
+}
+
+// WithWriteCapacity returns a new Options value with WriteCapacity set to the given
+//
+// When write channel is full, Badger will block until write channel is flushed out.
+func (opt Options) WithWriteCapacity(writeCapacity int) Options {
+	opt.KVWriteCapacity = writeCapacity
 	return opt
 }
