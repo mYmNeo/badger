@@ -27,10 +27,11 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/dgraph-io/badger/pb"
-	"github.com/dgraph-io/badger/y"
 	"github.com/golang/protobuf/proto"
 	"github.com/pkg/errors"
+
+	"github.com/dgraph-io/badger/pb"
+	"github.com/dgraph-io/badger/y"
 )
 
 // Manifest represents the contents of the MANIFEST file in a Badger store.
@@ -194,15 +195,15 @@ func (mf *manifestFile) addChanges(changesParam []*pb.ManifestChange) error {
 
 	// Maybe we could use O_APPEND instead (on certain file systems)
 	mf.appendLock.Lock()
+	defer mf.appendLock.Unlock()
+
 	if err := applyChangeSet(&mf.manifest, &changes); err != nil {
-		mf.appendLock.Unlock()
 		return err
 	}
 	// Rewrite manifest if it'd shrink by 1/10 and it's big enough to care
 	if mf.manifest.Deletions > mf.deletionsRewriteThreshold &&
 		mf.manifest.Deletions > manifestDeletionsRatio*(mf.manifest.Creations-mf.manifest.Deletions) {
 		if err := mf.rewrite(); err != nil {
-			mf.appendLock.Unlock()
 			return err
 		}
 	} else {
@@ -211,14 +212,14 @@ func (mf *manifestFile) addChanges(changesParam []*pb.ManifestChange) error {
 		binary.BigEndian.PutUint32(lenCrcBuf[4:8], crc32.Checksum(buf, y.CastagnoliCrcTable))
 		buf = append(lenCrcBuf[:], buf...)
 		if _, err := mf.fp.Write(buf); err != nil {
-			mf.appendLock.Unlock()
 			return err
 		}
 	}
 
-	mf.appendLock.Unlock()
-	return y.FileSync(mf.fp)
+	return syncFunc(mf.fp)
 }
+
+var syncFunc = func(f *os.File) error { return y.FileSync(f) }
 
 // Has to be 4 bytes.  The value can never change, ever, anyway.
 var magicText = [4]byte{'B', 'd', 'g', 'r'}
