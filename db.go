@@ -1552,11 +1552,11 @@ func (db *DB) Subscribe(ctx context.Context, cb func(kv *KVList) error, prefixes
 	}
 
 	c := y.NewCloser(1)
-	recvCh, id := db.pub.newSubscriber(c, prefixes...)
+	s := db.pub.newSubscriber(c, prefixes...)
 	slurp := func(batch *pb.KVList) error {
 		for {
 			select {
-			case kvs := <-recvCh:
+			case kvs := <-s.sendCh:
 				batch.Kv = append(batch.Kv, kvs.Kv...)
 			default:
 				if len(batch.GetKv()) > 0 {
@@ -1566,6 +1566,17 @@ func (db *DB) Subscribe(ctx context.Context, cb func(kv *KVList) error, prefixes
 			}
 		}
 	}
+
+	drain := func() {
+		for {
+			select {
+			case <-s.sendCh:
+			default:
+				return
+			}
+		}
+	}
+
 	for {
 		select {
 		case <-c.HasBeenClosed():
@@ -1577,15 +1588,19 @@ func (db *DB) Subscribe(ctx context.Context, cb func(kv *KVList) error, prefixes
 			return err
 		case <-ctx.Done():
 			c.Done()
-			db.pub.deleteSubscriber(id)
+			atomic.StoreUint64(s.active, 0)
+			drain()
+			db.pub.deleteSubscriber(s.id)
 			// Delete the subscriber to avoid further updates.
 			return ctx.Err()
-		case batch := <-recvCh:
+		case batch := <-s.sendCh:
 			err := slurp(batch)
 			if err != nil {
 				c.Done()
+				atomic.StoreUint64(s.active, 0)
+				drain()
 				// Delete the subscriber if there is an error by the callback.
-				db.pub.deleteSubscriber(id)
+				db.pub.deleteSubscriber(s.id)
 				return err
 			}
 		}
