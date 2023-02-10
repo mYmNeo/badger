@@ -18,6 +18,7 @@ package badger
 
 import (
 	"sync"
+	"sync/atomic"
 
 	"github.com/dgraph-io/badger/pb"
 	"github.com/dgraph-io/badger/trie"
@@ -25,15 +26,19 @@ import (
 )
 
 type subscriber struct {
+	id        uint64
 	prefixes  [][]byte
-	sendCh    chan<- *pb.KVList
+	sendCh    chan *pb.KVList
 	subCloser *y.Closer
+	// this will be atomic pointer which will be used to
+	// track whether the subscriber is active or not
+	active *uint64
 }
 
 type publisher struct {
 	sync.Mutex
 	pubCh       chan requests
-	subscribers map[uint64]subscriber
+	subscribers map[uint64]*subscriber
 	nextID      uint64
 	indexer     *trie.Trie
 }
@@ -41,7 +46,7 @@ type publisher struct {
 func newPublisher() *publisher {
 	return &publisher{
 		pubCh:       make(chan requests, 1000),
-		subscribers: make(map[uint64]subscriber),
+		subscribers: make(map[uint64]*subscriber),
 		nextID:      0,
 		indexer:     trie.NewTrie(),
 	}
@@ -104,26 +109,32 @@ func (p *publisher) publishUpdates(reqs requests) {
 	}
 
 	for id, kvs := range batchedUpdates {
-		p.subscribers[id].sendCh <- kvs
+		if atomic.LoadUint64(p.subscribers[id].active) == 1 {
+			p.subscribers[id].sendCh <- kvs
+		}
 	}
 }
 
-func (p *publisher) newSubscriber(c *y.Closer, prefixes ...[]byte) (<-chan *pb.KVList, uint64) {
+func (p *publisher) newSubscriber(c *y.Closer, prefixes ...[]byte) *subscriber {
 	p.Lock()
 	defer p.Unlock()
 	ch := make(chan *pb.KVList, 1000)
 	id := p.nextID
 	// Increment next ID.
 	p.nextID++
-	p.subscribers[id] = subscriber{
+	active := uint64(1)
+	s := &subscriber{
+		active:    &active,
+		id:        id,
 		prefixes:  prefixes,
 		sendCh:    ch,
 		subCloser: c,
 	}
+	p.subscribers[id] = s
 	for _, prefix := range prefixes {
 		p.indexer.Add(prefix, id)
 	}
-	return ch, id
+	return s
 }
 
 // cleanSubscribers stops all the subscribers. Ideally, It should be called while closing DB.

@@ -19,8 +19,11 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/pkg/errors"
 	"github.com/stretchr/testify/require"
 
 	"github.com/dgraph-io/badger/pb"
@@ -99,5 +102,58 @@ func TestMultiplePrefix(t *testing.T) {
 			return txn.SetEntry(NewEntry([]byte("hello"), []byte("badger")))
 		})
 		wg.Wait()
+	})
+}
+
+func TestPublisherDeadlock(t *testing.T) {
+	runBadgerTest(t, nil, func(t *testing.T, db *DB) {
+		var subWg sync.WaitGroup
+		subWg.Add(1)
+
+		var firstUpdate sync.WaitGroup
+		firstUpdate.Add(1)
+
+		var subDone sync.WaitGroup
+		subDone.Add(1)
+		go func() {
+			subWg.Done()
+			match := []byte("ke")
+			err := db.Subscribe(context.Background(), func(kvs *pb.KVList) error {
+				firstUpdate.Done()
+				time.Sleep(time.Second * 20)
+				return errors.New("error returned")
+			}, match)
+			require.Error(t, err, errors.New("error returned"))
+			subDone.Done()
+		}()
+		subWg.Wait()
+		go func() {
+			err := db.Update(func(txn *Txn) error {
+				e := NewEntry([]byte(fmt.Sprintf("key%d", 0)), []byte(fmt.Sprintf("value%d", 0)))
+				return txn.SetEntry(e)
+			})
+			require.NoError(t, err)
+		}()
+
+		firstUpdate.Wait()
+		req := int64(0)
+		for i := 1; i < 1110; i++ {
+			time.Sleep(time.Millisecond * 10)
+			go func(i int) {
+				err := db.Update(func(txn *Txn) error {
+					e := NewEntry([]byte(fmt.Sprintf("key%d", i)), []byte(fmt.Sprintf("value%d", i)))
+					return txn.SetEntry(e)
+				})
+				require.NoError(t, err)
+				atomic.AddInt64(&req, 1)
+			}(i)
+		}
+		for {
+			if atomic.LoadInt64(&req) == 1109 {
+				break
+			}
+			time.Sleep(time.Second)
+		}
+		subDone.Wait()
 	})
 }
