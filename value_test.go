@@ -433,6 +433,73 @@ func TestValueGC4(t *testing.T) {
 	require.NoError(t, kv.Close())
 }
 
+func TestValueGC5(t *testing.T) {
+	dir, err := ioutil.TempDir("", "badger-test")
+	require.NoError(t, err)
+	defer removeDir(dir)
+	opt := getTestOptions(dir)
+	opt.ValueLogFileSize = 1 << 20
+
+	kv, _ := Open(opt)
+	defer kv.Close()
+
+	sz := 32 << 10
+	txn := kv.NewTransaction(true)
+	for i := 0; i < 100; i++ {
+		v := make([]byte, sz)
+		rand.Read(v[:rand.Intn(sz)])
+		require.NoError(t, txn.SetEntry(NewEntry([]byte(fmt.Sprintf("key%d", i)), v)))
+		if i%20 == 0 {
+			require.NoError(t, txn.Commit())
+			txn = kv.NewTransaction(true)
+		}
+	}
+	require.NoError(t, txn.Commit())
+
+	for i := 0; i < 45; i++ {
+		txnDelete(t, kv, []byte(fmt.Sprintf("key%d", i)))
+	}
+
+	require.NoError(t, kv.Close())
+
+	kv, _ = Open(opt)
+	defer kv.Close()
+
+	v, ok := kv.vlog.filesMap.Load(kv.vlog.sortedFids()[0])
+	require.True(t, ok)
+	lf := v.(*logFile)
+
+	tr := trace.New("Test", "Test")
+	defer tr.Finish()
+	require.NoError(t, kv.vlog.doRunGC(lf, 0.9, tr))
+
+	for i := 0; i < 45; i++ {
+		key := []byte(fmt.Sprintf("key%d", i))
+
+		require.NoError(t, kv.View(func(txn *Txn) error {
+			_, err := txn.Get(key)
+			require.Equal(t, ErrKeyNotFound, err)
+			return nil
+		}))
+	}
+
+	for i := 45; i < 100; i++ {
+		key := []byte(fmt.Sprintf("key%d", i))
+
+		require.NoError(t, kv.View(func(txn *Txn) error {
+			item, err := txn.Get(key)
+			require.NoError(t, err)
+			val := getItemValue(t, item)
+			require.NotNil(t, val)
+			require.True(t, len(val) == sz, "Size found: %d", len(val))
+			return nil
+		}))
+	}
+
+	_, err = os.Stat(lf.path)
+	require.True(t, os.IsNotExist(err))
+}
+
 func TestPersistLFDiscardStats(t *testing.T) {
 	dir, err := ioutil.TempDir("", "badger-test")
 	require.NoError(t, err)

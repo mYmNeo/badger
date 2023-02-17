@@ -26,7 +26,6 @@ import (
 	"io"
 	"io/ioutil"
 	"math"
-	"math/rand"
 	"os"
 	"sort"
 	"strconv"
@@ -348,21 +347,27 @@ func (vlog *valueLog) iterate(lf *logFile, offset uint32, fn logEntry) (uint32, 
 
 func (vlog *valueLog) rewrite(f *logFile, tr trace.Trace) error {
 	maxFid := atomic.LoadUint32(&vlog.maxFid)
-	y.AssertTruef(uint32(f.fid) < maxFid, "fid to move: %d. Current max fid: %d", f.fid, maxFid)
+	y.AssertTruef(f.fid < maxFid, "fid to move: %d. Current max fid: %d", f.fid, maxFid)
 	tr.LazyPrintf("Rewriting fid: %d", f.fid)
 
 	wb := make([]*Entry, 0, 1000)
 	var size int64
 
 	y.AssertTrue(vlog.db != nil)
-	var count, moved int
+	var count int
+	var readTs uint64
+
+	if !vlog.db.opt.managedTxns {
+		readTs = vlog.db.orc.readTs()
+	}
+	keyBuf := bytes.NewBuffer(make([]byte, 0, 1<<20))
 	fe := func(e Entry) error {
 		count++
 		if count%100000 == 0 {
 			tr.LazyPrintf("Processing entry %d", count)
 		}
 
-		vs, err := vlog.db.get(e.Key)
+		vs, err := vlog.db.get(vlog.getSearchKey(keyBuf, e.Key, readTs))
 		if err != nil {
 			return err
 		}
@@ -391,7 +396,6 @@ func (vlog *valueLog) rewrite(f *logFile, tr trace.Trace) error {
 		// NOTE: It might be possible that the entry read from the LSM Tree points to
 		// an older vlog file. See the comments in the else part.
 		if vp.Fid == f.fid && vp.Offset == e.offset {
-			moved++
 			// This new entry only contains the key, and a pointer to the value.
 			ne := new(Entry)
 			// Remove only the bitValuePointer and transaction markers. We
@@ -506,7 +510,6 @@ func (vlog *valueLog) rewrite(f *logFile, tr trace.Trace) error {
 		i += batchSize
 	}
 	tr.LazyPrintf("Processed %d entries in %d loops", len(wb), loops)
-	tr.LazyPrintf("Total entries: %d. Moved: %d", count, moved)
 	tr.LazyPrintf("Removing fid: %d", f.fid)
 	var deleteFileNow bool
 	// Entries written to LSM. Remove the older file now.
@@ -520,11 +523,14 @@ func (vlog *valueLog) rewrite(f *logFile, tr trace.Trace) error {
 			deleteFileNow = true
 		} else {
 			vlog.filesToBeDeleted.Store(f.fid, struct{}{})
+			vlog.opt.Logger.Infof("Unlink file %s", f.path)
+			vlog.deleteLogFile(f)
 		}
 	}
 
 	if deleteFileNow {
-		if err := vlog.deleteLogFile(f); err != nil {
+		vlog.opt.Logger.Infof("Removing file %s", f.path)
+		if err := vlog.deleteLogFileWithCleanup(f); err != nil {
 			return err
 		}
 	}
@@ -557,7 +563,7 @@ func (vlog *valueLog) decrIteratorCount() error {
 	})
 
 	for _, lf := range lfs {
-		if err := vlog.deleteLogFile(lf); err != nil {
+		if err := vlog.deleteLogFileWithCleanup(lf); err != nil {
 			return err
 		}
 	}
@@ -565,6 +571,18 @@ func (vlog *valueLog) decrIteratorCount() error {
 }
 
 func (vlog *valueLog) deleteLogFile(lf *logFile) error {
+	if lf == nil {
+		return nil
+	}
+	lf.lock.Lock()
+	defer lf.lock.Unlock()
+
+	path := vlog.fpath(lf.fid)
+	os.Remove(path)
+	return nil
+}
+
+func (vlog *valueLog) deleteLogFileWithCleanup(lf *logFile) error {
 	if lf == nil {
 		return nil
 	}
@@ -580,7 +598,13 @@ func (vlog *valueLog) deleteLogFile(lf *logFile) error {
 	if err := lf.fd.Close(); err != nil {
 		return err
 	}
-	return os.Remove(path)
+
+	err := os.Remove(path)
+	if !os.IsNotExist(err) {
+		return err
+	}
+
+	return nil
 }
 
 func (vlog *valueLog) dropAll() (int, error) {
@@ -590,7 +614,7 @@ func (vlog *valueLog) dropAll() (int, error) {
 	deleteAll := func() error {
 		var err error
 		vlog.filesMap.Range(func(key, value any) bool {
-			if err = vlog.deleteLogFile(value.(*logFile)); err != nil {
+			if err = vlog.deleteLogFileWithCleanup(value.(*logFile)); err != nil {
 				return false
 			}
 			count++
@@ -929,6 +953,13 @@ func (vlog *valueLog) Close() error {
 	vlog.elog.Printf("Stopping garbage collection of values.")
 	defer vlog.elog.Finish()
 
+	vlog.elog.Printf("Delete vlog files to be deleted.")
+	vlog.filesToBeDeleted.Range(func(k, v interface{}) bool {
+		f := v.(*logFile)
+		vlog.deleteLogFileWithCleanup(f)
+		return true
+	})
+
 	var err error
 	vlog.filesMap.Range(func(k, v interface{}) bool {
 		id := k.(uint32)
@@ -1263,65 +1294,38 @@ func (vlog *valueLog) pickLog(head valuePointer, tr trace.Trace) (files []*logFi
 		return nil
 	}
 
-	// Pick a candidate that contains the largest amount of discardable data
-	candidate := struct {
-		fid     uint32
-		discard int64
-	}{math.MaxUint32, 0}
-	vlog.lfDiscardStats.RLock()
 	for _, fid := range fids {
 		if fid >= head.Fid {
 			break
 		}
-		if vlog.lfDiscardStats.m[fid] > candidate.discard {
-			candidate.fid = fid
-			candidate.discard = vlog.lfDiscardStats.m[fid]
-		}
-	}
-	vlog.lfDiscardStats.RUnlock()
 
-	if candidate.fid != math.MaxUint32 { // Found a candidate
-		tr.LazyPrintf("Found candidate via discard stats: %v", candidate)
-		v, ok := vlog.filesMap.Load(candidate.fid)
+		v, ok := vlog.filesMap.Load(fid)
 		if ok {
 			files = append(files, v.(*logFile))
 		}
-	} else {
-		tr.LazyPrintf("Could not find candidate via discard stats. Randomly picking one.")
 	}
 
-	// Fallback to randomly picking a log file
-	var idxHead int
-	for i, fid := range fids {
-		if fid == head.Fid {
-			idxHead = i
-			break
-		}
-	}
-	if idxHead == 0 { // Not found or first file
-		tr.LazyPrintf("Could not find any file.")
-		return nil
-	}
-	idx := rand.Intn(idxHead) // Don’t include head.Fid. We pick a random file before it.
-	if idx > 0 {
-		idx = rand.Intn(idx + 1) // Another level of rand to favor smaller fids.
-	}
-	tr.LazyPrintf("Randomly chose fid: %d", fids[idx])
-	v, ok := vlog.filesMap.Load(fids[idx])
-	if ok {
-		files = append(files, v.(*logFile))
-	}
 	return files
 }
 
 func discardEntry(e Entry, vs y.ValueStruct, db *DB) bool {
-	if vs.Version != y.ParseTs(e.Key) {
+	ver := y.ParseTs(e.Key)
+	if vs.Version != ver {
 		// Version not found. Discard.
 		return true
 	}
+
+	if db.opt.managedTxns && db.opt.NumVersionsToKeep == 1 {
+		if ver < vs.Version {
+			// Remove old version
+			return true
+		}
+	}
+
 	if isDeletedOrExpired(vs.Meta, vs.ExpiresAt) {
 		return true
 	}
+
 	if (vs.Meta & bitValuePointer) == 0 {
 		// Key also stores the value in LSM. Discard.
 		return true
@@ -1344,64 +1348,34 @@ func (vlog *valueLog) doRunGC(lf *logFile, discardRatio float64, tr trace.Trace)
 	}()
 
 	type reason struct {
-		total   float64
-		discard float64
+		total   uint32
+		discard uint32
 		count   int
 	}
 
-	fi, err := lf.fd.Stat()
-	if err != nil {
-		tr.LazyPrintf("Error while finding file size: %v", err)
-		tr.SetError()
-		return err
-	}
-
-	// Set up the sampling window sizes.
-	sizeWindow := float64(fi.Size()) * 0.1                          // 10% of the file as window.
-	sizeWindowM := sizeWindow / (1 << 20)                           // in MBs.
-	countWindow := int(float64(vlog.opt.ValueLogMaxEntries) * 0.01) // 1% of num entries.
-	tr.LazyPrintf("Size window: %5.2f. Count window: %d.", sizeWindow, countWindow)
-
-	// Pick a random start point for the log.
-	skipFirstM := float64(rand.Int63n(fi.Size())) // Pick a random starting location.
-	skipFirstM -= sizeWindow                      // Avoid hitting EOF by moving back by window.
-	skipFirstM /= float64(mi)                     // Convert to MBs.
-	tr.LazyPrintf("Skip first %5.2f MB of file of size: %d MB", skipFirstM, fi.Size()/mi)
-	var skipped float64
-
 	var r reason
-	start := time.Now()
 	y.AssertTrue(vlog.db != nil)
 	s := new(y.Slice)
-	var numIterations int
+	var (
+		numIterations int
+		readTs        uint64
+	)
+
+	if !vlog.db.opt.managedTxns {
+		readTs = vlog.db.orc.readTs()
+	}
+	keyBuf := bytes.NewBuffer(make([]byte, 0, 1<<20))
 	_, err = vlog.iterate(lf, 0, func(e Entry, vp valuePointer) error {
 		numIterations++
-		esz := float64(vp.Len) / (1 << 20) // in MBs.
-		if skipped < skipFirstM {
-			skipped += esz
-			return nil
-		}
-
-		// Sample until we reach the window sizes or exceed 10 seconds.
-		if r.count > countWindow {
-			tr.LazyPrintf("Stopping sampling after %d entries.", countWindow)
-			return errStop
-		}
-		if r.total > sizeWindowM {
-			tr.LazyPrintf("Stopping sampling after reaching window size.")
-			return errStop
-		}
-		if time.Since(start) > 10*time.Second {
-			tr.LazyPrintf("Stopping sampling after 10 seconds.")
-			return errStop
-		}
+		esz := vp.Len
 		r.total += esz
 		r.count++
 
-		vs, err := vlog.db.get(e.Key)
+		vs, err := vlog.db.get(vlog.getSearchKey(keyBuf, e.Key, readTs))
 		if err != nil {
 			return err
 		}
+
 		if discardEntry(e, vs, vlog.db) {
 			r.discard += esz
 			return nil
@@ -1447,12 +1421,13 @@ func (vlog *valueLog) doRunGC(lf *logFile, discardRatio float64, tr trace.Trace)
 		tr.SetError()
 		return err
 	}
-	tr.LazyPrintf("Fid: %d. Skipped: %5.2fMB Num iterations: %d. Data status=%+v\n",
-		lf.fid, skipped, numIterations, r)
+	tr.LazyPrintf("Fid: %d. Num iterations: %d. Data status=%+v\n",
+		lf.fid, numIterations, r)
 
-	// If we couldn't sample at least a 1000 KV pairs or at least 75% of the window size,
-	// and what we can discard is below the threshold, we should skip the rewrite.
-	if (r.count < countWindow && r.total < sizeWindowM*0.75) || r.discard < discardRatio*r.total {
+	vlog.opt.Logger.Infof("%s total: %d, discard: %d, ratio: %.2f", lf.path, r.total, r.discard, float64(r.discard)/float64(r.total))
+
+	// We can discard is below the threshold, we should skip the rewrite.
+	if float64(r.discard) < discardRatio*float64(r.total) {
 		tr.LazyPrintf("Skipping GC on fid: %d", lf.fid)
 		return ErrNoRewrite
 	}
@@ -1461,6 +1436,14 @@ func (vlog *valueLog) doRunGC(lf *logFile, discardRatio float64, tr trace.Trace)
 	}
 	tr.LazyPrintf("Done rewriting.")
 	return nil
+}
+
+func (vlog *valueLog) getSearchKey(out *bytes.Buffer, key []byte, ts uint64) []byte {
+	if ts > 0 {
+		return y.KeyWithTsBuffer(out, y.ParseKey(key), ts)
+	}
+
+	return key
 }
 
 func (vlog *valueLog) waitOnGC(lc *y.Closer) {
@@ -1497,8 +1480,8 @@ func (vlog *valueLog) runGC(discardRatio float64, head valuePointer) error {
 			}
 			tried[lf.fid] = true
 			err = vlog.doRunGC(lf, discardRatio, tr)
-			if err == nil {
-				return nil
+			if err != nil && err != ErrNoRewrite {
+				break
 			}
 		}
 		return err
