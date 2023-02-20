@@ -265,11 +265,10 @@ func (s *levelHandler) get(key []byte) (y.ValueStruct, error) {
 		}
 
 		it := th.NewIterator(false)
-		defer it.Close()
-
 		y.NumLSMGets.Add(s.strLevel, 1)
 		it.Seek(key)
 		if !it.Valid() {
+			it.Close()
 			continue
 		}
 		if y.SameKey(key, it.Key()) {
@@ -278,6 +277,7 @@ func (s *levelHandler) get(key []byte) (y.ValueStruct, error) {
 				maxVs.Version = version
 			}
 		}
+		it.Close()
 	}
 	return maxVs, decr()
 }
