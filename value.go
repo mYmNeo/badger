@@ -282,8 +282,8 @@ func (vlog *valueLog) iterate(lf *logFile, offset uint32, fn logEntry) (uint32, 
 
 	reader := bufio.NewReader(lf.fd)
 	read := &safeRead{
-		k:            make([]byte, 10),
-		v:            make([]byte, 10),
+		k:            make([]byte, 1<<20),
+		v:            make([]byte, 4<<20),
 		recordOffset: offset,
 	}
 
