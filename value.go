@@ -36,6 +36,7 @@ import (
 
 	"github.com/pkg/errors"
 	"golang.org/x/net/trace"
+	"golang.org/x/sys/unix"
 
 	"github.com/dgraph-io/badger/options"
 	"github.com/dgraph-io/badger/y"
@@ -579,7 +580,14 @@ func (vlog *valueLog) deleteLogFile(lf *logFile) error {
 
 	path := vlog.fpath(lf.fid)
 	os.Remove(path)
+	if lf.fmap != nil {
+		vlog.reclaimMmap(lf)
+	}
 	return nil
+}
+
+func (vlog *valueLog) reclaimMmap(lf *logFile) error {
+	return unix.Madvise(lf.fmap, unix.MADV_DONTNEED)
 }
 
 func (vlog *valueLog) deleteLogFileWithCleanup(lf *logFile) error {
