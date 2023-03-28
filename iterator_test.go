@@ -80,10 +80,13 @@ func TestPickSortTables(t *testing.T) {
 	genTables := func(mks ...MockKeys) []*table.Table {
 		out := make([]*table.Table, 0)
 		for _, mk := range mks {
-			f := buildTable(t, [][]string{{mk.small, "some value"}, {mk.large, "some value"}})
-			tbl, err := table.OpenTable(f, options.MemoryMap, nil)
-			require.NoError(t, err)
-			out = append(out, tbl)
+			func() {
+				f := buildTable(t, [][]string{{mk.small, "some value"}, {mk.large, "some value"}})
+				tbl, err := table.OpenTable(f, options.MemoryMap, nil)
+				require.NoError(t, err)
+				defer func() { require.NoError(t, tbl.DecrRef()) }()
+				out = append(out, tbl)
+			}()
 		}
 		return out
 	}
