@@ -78,6 +78,7 @@ func TestTableIterator(t *testing.T) {
 	for _, n := range []int{99, 100, 101} {
 		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
 			f := buildTestTable(t, "key", n)
+			defer os.Remove(f.Name())
 			table, err := OpenTable(f, options.MemoryMap, nil)
 			require.NoError(t, err)
 			defer table.DecrRef()
@@ -100,6 +101,7 @@ func TestSeekToFirst(t *testing.T) {
 	for _, n := range []int{99, 100, 101, 199, 200, 250, 9999, 10000} {
 		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
 			f := buildTestTable(t, "key", n)
+			defer os.Remove(f.Name())
 			table, err := OpenTable(f, options.MemoryMap, nil)
 			require.NoError(t, err)
 			defer table.DecrRef()
@@ -118,6 +120,7 @@ func TestSeekToLast(t *testing.T) {
 	for _, n := range []int{99, 100, 101, 199, 200, 250, 9999, 10000} {
 		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
 			f := buildTestTable(t, "key", n)
+			defer os.Remove(f.Name())
 			table, err := OpenTable(f, options.MemoryMap, nil)
 			require.NoError(t, err)
 			defer table.DecrRef()
@@ -139,6 +142,7 @@ func TestSeekToLast(t *testing.T) {
 
 func TestSeek(t *testing.T) {
 	f := buildTestTable(t, "k", 10000)
+	defer os.Remove(f.Name())
 	table, err := OpenTable(f, options.MemoryMap, nil)
 	require.NoError(t, err)
 	defer table.DecrRef()
@@ -174,6 +178,7 @@ func TestSeek(t *testing.T) {
 
 func TestSeekForPrev(t *testing.T) {
 	f := buildTestTable(t, "k", 10000)
+	defer os.Remove(f.Name())
 	table, err := OpenTable(f, options.MemoryMap, nil)
 	require.NoError(t, err)
 	defer table.DecrRef()
@@ -212,6 +217,7 @@ func TestIterateFromStart(t *testing.T) {
 	for _, n := range []int{99, 100, 101, 199, 200, 250, 9999, 10000} {
 		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
 			f := buildTestTable(t, "key", n)
+			defer os.Remove(f.Name())
 			table, err := OpenTable(f, options.MemoryMap, nil)
 			require.NoError(t, err)
 			defer table.DecrRef()
@@ -239,6 +245,7 @@ func TestIterateFromEnd(t *testing.T) {
 	for _, n := range []int{99, 100, 101, 199, 200, 250, 9999, 10000} {
 		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
 			f := buildTestTable(t, "key", n)
+			defer os.Remove(f.Name())
 			table, err := OpenTable(f, options.FileIO, nil)
 			require.NoError(t, err)
 			defer table.DecrRef()
@@ -262,6 +269,7 @@ func TestIterateFromEnd(t *testing.T) {
 
 func TestTable(t *testing.T) {
 	f := buildTestTable(t, "key", 10000)
+	defer os.Remove(f.Name())
 	table, err := OpenTable(f, options.FileIO, nil)
 	require.NoError(t, err)
 	defer table.DecrRef()
@@ -289,6 +297,7 @@ func TestTable(t *testing.T) {
 
 func TestIterateBackAndForth(t *testing.T) {
 	f := buildTestTable(t, "key", 10000)
+	defer os.Remove(f.Name())
 	table, err := OpenTable(f, options.MemoryMap, nil)
 	require.NoError(t, err)
 	defer table.DecrRef()
@@ -330,6 +339,7 @@ func TestIterateBackAndForth(t *testing.T) {
 
 func TestUniIterator(t *testing.T) {
 	f := buildTestTable(t, "key", 10000)
+	defer os.Remove(f.Name())
 	table, err := OpenTable(f, options.MemoryMap, nil)
 	require.NoError(t, err)
 	defer table.DecrRef()
@@ -365,6 +375,7 @@ func TestConcatIteratorOneTable(t *testing.T) {
 		{"k1", "a1"},
 		{"k2", "a2"},
 	})
+	defer os.Remove(f.Name())
 
 	tbl, err := OpenTable(f, options.MemoryMap, nil)
 	require.NoError(t, err)
@@ -384,8 +395,11 @@ func TestConcatIteratorOneTable(t *testing.T) {
 
 func TestConcatIterator(t *testing.T) {
 	f := buildTestTable(t, "keya", 10000)
+	defer os.Remove(f.Name())
 	f2 := buildTestTable(t, "keyb", 10000)
+	defer os.Remove(f2.Name())
 	f3 := buildTestTable(t, "keyc", 10000)
+	defer os.Remove(f3.Name())
 	tbl, err := OpenTable(f, options.MemoryMap, nil)
 	require.NoError(t, err)
 	defer tbl.DecrRef()
@@ -468,11 +482,13 @@ func TestMergingIterator(t *testing.T) {
 		{"k4", "a4"},
 		{"k5", "a5"},
 	})
+	defer os.Remove(f1.Name())
 	f2 := buildTable(t, [][]string{
 		{"k2", "b2"},
 		{"k3", "b3"},
 		{"k4", "b4"},
 	})
+	defer os.Remove(f2.Name())
 
 	expected := []struct {
 		key   string
@@ -515,12 +531,14 @@ func TestMergingIteratorReversed(t *testing.T) {
 		{"k4", "a4"},
 		{"k5", "a5"},
 	})
+	defer os.Remove(f1.Name())
 	f2 := buildTable(t, [][]string{
 		{"k1", "b2"},
 		{"k3", "b3"},
 		{"k4", "b4"},
 		{"k5", "b5"},
 	})
+	defer os.Remove(f2.Name())
 
 	expected := []struct {
 		key   string
@@ -563,7 +581,9 @@ func TestMergingIteratorTakeOne(t *testing.T) {
 		{"k1", "a1"},
 		{"k2", "a2"},
 	})
+	defer os.Remove(f1.Name())
 	f2 := buildTable(t, [][]string{})
+	defer os.Remove(f2.Name())
 
 	t1, err := OpenTable(f1, options.LoadToRAM, nil)
 	require.NoError(t, err)
@@ -600,10 +620,12 @@ func TestMergingIteratorTakeOne(t *testing.T) {
 // Take only the second iterator.
 func TestMergingIteratorTakeTwo(t *testing.T) {
 	f1 := buildTable(t, [][]string{})
+	defer os.Remove(f1.Name())
 	f2 := buildTable(t, [][]string{
 		{"k1", "a1"},
 		{"k2", "a2"},
 	})
+	defer os.Remove(f2.Name())
 
 	t1, err := OpenTable(f1, options.LoadToRAM, nil)
 	require.NoError(t, err)
@@ -643,6 +665,7 @@ func TestTableChecksum(t *testing.T) {
 	rb := make([]byte, 100)
 	rand.Read(rb)
 	f := buildTestTable(t, "k", 10000)
+	defer os.Remove(f.Name())
 	fi, err := f.Stat()
 	require.NoError(t, err, "unable to get file information")
 	// Write random bytes at random location.
