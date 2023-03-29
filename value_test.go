@@ -77,7 +77,7 @@ func TestValueBasic(t *testing.T) {
 	defer runCallback(cb1)
 	defer runCallback(cb2)
 
-	readEntries := []Entry{valueBytesToEntry(buf1), valueBytesToEntry(buf2)}
+	readEntries := []Entry{valueBytesToEntryForTest(buf1), valueBytesToEntryForTest(buf2)}
 	require.EqualValues(t, []Entry{
 		{
 			Key:   []byte("samplekey"),
@@ -1012,7 +1012,7 @@ func BenchmarkReadWrite(b *testing.B) {
 							b.Fatalf("Benchmark Read: %v", err)
 						}
 
-						e := valueBytesToEntry(buf)
+						e, _ := valueBytesToEntry(buf)
 						if len(e.Key) != 16 {
 							b.Fatalf("Key is invalid")
 						}
@@ -1277,7 +1277,7 @@ func TestValueEntryChecksum(t *testing.T) {
 
 		file, err := os.OpenFile(path, os.O_RDWR, 0644)
 		require.NoError(t, err)
-		offset := 50
+		offset := 0x2b
 		orig := make([]byte, 1)
 		_, err = file.ReadAt(orig, int64(offset))
 		require.NoError(t, err)

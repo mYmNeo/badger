@@ -7,6 +7,7 @@ require (
 	github.com/dgraph-io/ristretto v0.0.2
 	github.com/dustin/go-humanize v1.0.0
 	github.com/golang/protobuf v1.3.1
+	github.com/klauspost/compress v1.16.4
 	github.com/pkg/errors v0.9.1
 	github.com/spf13/cobra v0.0.5
 	github.com/stretchr/testify v1.4.0
