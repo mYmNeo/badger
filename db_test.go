@@ -95,7 +95,7 @@ func getItemValue(t *testing.T, item *Item) (val []byte) {
 	if err != nil {
 		t.Error(err)
 	}
-	if int64(len(v)) != size {
+	if item.meta&bitCompression == 0 && int64(len(v)) != size {
 		t.Errorf("incorrect size: expected %d, got %d", len(v), size)
 	}
 	if v == nil {
@@ -109,7 +109,7 @@ func getItemValue(t *testing.T, item *Item) (val []byte) {
 
 func txnSet(t *testing.T, kv *DB, key []byte, val []byte, meta byte) {
 	txn := kv.NewTransaction(true)
-	require.NoError(t, txn.SetEntry(NewEntry(key, val).WithMeta(meta)))
+	require.NoError(t, txn.SetEntry(NewEntry(key, val).WithMeta(meta).WithCompression()))
 	require.NoError(t, txn.Commit())
 }
 

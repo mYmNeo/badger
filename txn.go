@@ -27,6 +27,7 @@ import (
 	"sync/atomic"
 
 	"github.com/dgraph-io/ristretto/z"
+	"github.com/klauspost/compress/s2"
 	"github.com/pkg/errors"
 
 	"github.com/dgraph-io/badger/y"
@@ -351,6 +352,11 @@ func (txn *Txn) modify(e *Entry) error {
 		return exceedsSize("Key", maxKeySize, e.Key)
 	case int64(len(e.Value)) > txn.db.opt.ValueLogFileSize:
 		return exceedsSize("Value", txn.db.opt.ValueLogFileSize, e.Value)
+	}
+
+	canCompressed := len(e.Value) > txn.db.opt.ValueThreshold && s2.MaxEncodedLen(len(e.Value)) != -1
+	if !canCompressed {
+		e.meta &^= bitCompression
 	}
 
 	if err := txn.checkSize(e); err != nil {

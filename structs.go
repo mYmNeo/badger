@@ -5,9 +5,12 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
+	"io"
 	"sync"
 	"time"
 	"unsafe"
+
+	"github.com/klauspost/compress/s2"
 
 	"github.com/dgraph-io/badger/y"
 )
@@ -114,35 +117,40 @@ var crcPool = sync.Pool{
 
 // Encodes e to buf. Returns number of bytes written.
 func encodeEntry(e *Entry, buf *bytes.Buffer) (int, error) {
+	var (
+		key         []byte
+		val         []byte
+		enabledByte byte
+	)
+
+	if e.meta&bitCompression > 0 {
+		key = s2.Encode(nil, e.Key)
+		val = s2.Encode(nil, e.Value)
+		enabledByte = bitCompression
+	} else {
+		key = e.Key
+		val = e.Value
+	}
+
 	h := header{
-		klen:      uint32(len(e.Key)),
-		vlen:      uint32(len(e.Value)),
+		klen:      uint32(len(key)),
+		vlen:      uint32(len(val)),
 		expiresAt: e.ExpiresAt,
-		meta:      e.meta,
+		meta:      e.meta | enabledByte,
 		userMeta:  e.UserMeta,
 	}
 
 	headerEnc := headerPool.Get().([]byte)
 	defer headerPool.Put(headerEnc)
 
-	h.Encode(headerEnc)
-
 	hash := crc32.New(y.CastagnoliCrcTable)
+	writer := io.MultiWriter(buf, hash)
 
-	buf.Write(headerEnc)
-	if _, err := hash.Write(headerEnc); err != nil {
-		return 0, err
-	}
-
-	buf.Write(e.Key)
-	if _, err := hash.Write(e.Key); err != nil {
-		return 0, err
-	}
-
-	buf.Write(e.Value)
-	if _, err := hash.Write(e.Value); err != nil {
-		return 0, err
-	}
+	// header + key + val + crc
+	h.Encode(headerEnc)
+	y.Check2(writer.Write(headerEnc))
+	y.Check2(writer.Write(key))
+	y.Check2(writer.Write(val))
 
 	crcBuf := crcPool.Get().([]byte)
 	defer crcPool.Put(crcBuf)
@@ -150,7 +158,7 @@ func encodeEntry(e *Entry, buf *bytes.Buffer) (int, error) {
 	binary.BigEndian.PutUint32(crcBuf, hash.Sum32())
 	buf.Write(crcBuf)
 
-	return len(headerEnc) + len(e.Key) + len(e.Value) + len(crcBuf), nil
+	return len(headerEnc) + len(key) + len(val) + len(crcBuf), nil
 }
 
 func (e Entry) print(prefix string) {
@@ -200,5 +208,11 @@ func (e *Entry) WithTTL(dur time.Duration) *Entry {
 // function is called by MergeOperator's Add method.
 func (e *Entry) withMergeBit() *Entry {
 	e.meta = bitMergeEntry
+	return e
+}
+
+// WithCompression sets the compression bit in entry's metadata.
+func (e *Entry) WithCompression() *Entry {
+	e.meta = bitCompression
 	return e
 }

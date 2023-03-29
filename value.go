@@ -34,6 +34,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/klauspost/compress/s2"
 	"github.com/pkg/errors"
 	"golang.org/x/net/trace"
 	"golang.org/x/sys/unix"
@@ -53,6 +54,8 @@ const (
 	// The MSB 2 bits are for transactions.
 	bitTxn    byte = 1 << 6 // Set if the entry is part of a txn.
 	bitFinTxn byte = 1 << 7 // Set if the entry is to indicate end of txn in value log.
+
+	bitCompression byte = 1 << 4 // Set if the value is compressed.
 
 	mi int64 = 1 << 20
 
@@ -187,6 +190,8 @@ func (lf *logFile) sync() error {
 var errStop = errors.New("Stop iteration")
 var errTruncate = errors.New("Do truncate")
 var errDeleteVlogFile = errors.New("Delete vlog file")
+var errDecodeKey = errors.New("Error while decoding key")
+var errDecodeValue = errors.New("Error while decoding value")
 
 type logEntry func(e Entry, vp valuePointer) error
 
@@ -197,20 +202,20 @@ type safeRead struct {
 	recordOffset uint32
 }
 
-func (r *safeRead) Entry(reader *bufio.Reader) (*Entry, error) {
+func (r *safeRead) Entry(reader *bufio.Reader) (*Entry, uint32, error) {
 	var hbuf [headerBufSize]byte
 	var err error
 
 	hash := crc32.New(y.CastagnoliCrcTable)
 	tee := io.TeeReader(reader, hash)
 	if _, err = io.ReadFull(tee, hbuf[:]); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	var h header
 	h.Decode(hbuf[:])
 	if h.klen > uint32(1<<16) { // Key length must be below uint16.
-		return nil, errTruncate
+		return nil, 0, errTruncate
 	}
 	kl := int(h.klen)
 	if cap(r.k) < kl {
@@ -230,29 +235,41 @@ func (r *safeRead) Entry(reader *bufio.Reader) (*Entry, error) {
 		if err == io.EOF {
 			err = errTruncate
 		}
-		return nil, err
+		return nil, 0, err
 	}
 	if _, err = io.ReadFull(tee, e.Value); err != nil {
 		if err == io.EOF {
 			err = errTruncate
 		}
-		return nil, err
+		return nil, 0, err
 	}
 	var crcBuf [4]byte
 	if _, err = io.ReadFull(reader, crcBuf[:]); err != nil {
 		if err == io.EOF {
 			err = errTruncate
 		}
-		return nil, err
+		return nil, 0, err
 	}
 	crc := binary.BigEndian.Uint32(crcBuf[:])
 	if crc != hash.Sum32() {
-		return nil, errTruncate
+		return nil, 0, errTruncate
 	}
+
+	if h.meta&bitCompression > 0 {
+		e.Key, err = s2.Decode(nil, e.Key)
+		if err != nil {
+			return nil, 0, errDecodeKey
+		}
+		e.Value, err = s2.Decode(nil, e.Value)
+		if err != nil {
+			return nil, 0, errDecodeValue
+		}
+	}
+
 	e.meta = h.meta
 	e.UserMeta = h.userMeta
 	e.ExpiresAt = h.expiresAt
-	return e, nil
+	return e, h.klen + h.vlen, nil
 }
 
 // iterate iterates over log file. It doesn't not allocate new memory for every kv pair.
@@ -291,7 +308,7 @@ func (vlog *valueLog) iterate(lf *logFile, offset uint32, fn logEntry) (uint32, 
 	var lastCommit uint64
 	var validEndOffset uint32 = offset
 	for {
-		e, err := read.Entry(reader)
+		e, kvLen, err := read.Entry(reader)
 		if err == io.EOF {
 			break
 		} else if err == io.ErrUnexpectedEOF || err == errTruncate {
@@ -303,7 +320,7 @@ func (vlog *valueLog) iterate(lf *logFile, offset uint32, fn logEntry) (uint32, 
 		}
 
 		var vp valuePointer
-		vp.Len = uint32(headerBufSize + len(e.Key) + len(e.Value) + crc32.Size)
+		vp.Len = headerBufSize + kvLen + crc32.Size
 		read.recordOffset += vp.Len
 
 		vp.Offset = e.offset
@@ -782,7 +799,7 @@ func (vlog *valueLog) replayLog(lf *logFile, offset uint32, replayFn logEntry) e
 
 	// End offset is different from file size. So, we should truncate the file
 	// to that size.
-	y.AssertTrue(int64(endOffset) <= fi.Size())
+	y.AssertTruef(int64(endOffset) <= fi.Size(), "endOffset: %d, fi.Size: %d", endOffset, fi.Size())
 	if !vlog.opt.Truncate {
 		return ErrTruncateNeeded
 	}
@@ -1257,9 +1274,20 @@ func (vlog *valueLog) Read(vp valuePointer, s *y.Slice) ([]byte, func(), error) 
 		}
 	}
 	var h header
+	var val []byte
+
 	h.Decode(buf)
+	// skip header and key
 	n := uint32(headerBufSize) + h.klen
-	return buf[n : n+h.vlen], cb, nil
+	val = buf[n : n+h.vlen]
+	if h.meta&bitCompression > 0 {
+		val, err = s2.Decode(nil, buf[n:n+h.vlen])
+		if err != nil {
+			runCallback(cb)
+			return nil, nil, errors.Wrapf(err, "failed to decompress value for vp %+v", vp)
+		}
+	}
+	return val, cb, nil
 }
 
 func (vlog *valueLog) readValueBytes(vp valuePointer, s *y.Slice) ([]byte, func(), error) {
@@ -1279,7 +1307,7 @@ func (vlog *valueLog) readValueBytes(vp valuePointer, s *y.Slice) ([]byte, func(
 }
 
 // Test helper
-func valueBytesToEntry(buf []byte) (e Entry) {
+func valueBytesToEntry(buf []byte) (e Entry, err error) {
 	var h header
 	h.Decode(buf)
 	n := uint32(headerBufSize)
@@ -1289,6 +1317,22 @@ func valueBytesToEntry(buf []byte) (e Entry) {
 	e.meta = h.meta
 	e.UserMeta = h.userMeta
 	e.Value = buf[n : n+h.vlen]
+
+	if e.meta&bitCompression > 0 {
+		e.Key, err = s2.Decode(nil, e.Key)
+		if err != nil {
+			return e, err
+		}
+		e.Value, err = s2.Decode(nil, e.Value)
+		if err != nil {
+			return e, err
+		}
+	}
+	return
+}
+
+func valueBytesToEntryForTest(buf []byte) (e Entry) {
+	e, _ = valueBytesToEntry(buf)
 	return
 }
 
@@ -1413,7 +1457,10 @@ func (vlog *valueLog) doRunGC(lf *logFile, discardRatio float64, tr trace.Trace)
 			if err != nil {
 				return errStop
 			}
-			ne := valueBytesToEntry(buf)
+			ne, err := valueBytesToEntry(buf)
+			if err != nil {
+				return err
+			}
 			ne.offset = vp.Offset
 			ne.print("Latest Entry Header in LSM")
 			e.print("Latest Entry in Log")
@@ -1593,7 +1640,7 @@ func (vlog *valueLog) populateDiscardStats() error {
 	if len(val) == 0 {
 		return nil
 	}
-	if err := json.Unmarshal(val, &statsMap); err != nil {
+	if err = json.Unmarshal(val, &statsMap); err != nil {
 		return errors.Wrapf(err, "failed to unmarshal discard stats")
 	}
 	vlog.opt.Debugf("Value Log Discard stats: %v", statsMap)
