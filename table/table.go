@@ -82,29 +82,32 @@ func (t *Table) IncrRef() {
 // DecrRef decrements the refcount and possibly deletes the table
 func (t *Table) DecrRef() error {
 	newRef := atomic.AddInt32(&t.ref, -1)
-	if newRef == 0 {
-		// We can safely delete this file, because for all the current files, we always have
-		// at least one reference pointing to them.
-
-		// It's necessary to delete windows files
-		if t.loadingMode == options.MemoryMap {
-			if err := y.Munmap(t.mmap); err != nil {
-				return err
-			}
-			t.mmap = nil
-		}
-		if err := t.fd.Truncate(0); err != nil {
-			// This is very important to let the FS know that the file is deleted.
-			return err
-		}
-		filename := t.fd.Name()
-		if err := t.fd.Close(); err != nil {
-			return err
-		}
-		if err := os.Remove(filename); err != nil {
-			return err
-		}
+	if newRef > 0 {
+		return nil
 	}
+
+	// We can safely delete this file, because for all the current files, we always have
+	// at least one reference pointing to them.
+
+	// It's necessary to delete windows files
+	if t.loadingMode == options.MemoryMap {
+		if err := y.Munmap(t.mmap); err != nil {
+			return err
+		}
+		t.mmap = nil
+	}
+	if err := t.fd.Truncate(0); err != nil {
+		// This is very important to let the FS know that the file is deleted.
+		return err
+	}
+	filename := t.fd.Name()
+	if err := t.fd.Close(); err != nil {
+		return err
+	}
+	if err := os.Remove(filename); err != nil {
+		return err
+	}
+
 	return nil
 }
 
