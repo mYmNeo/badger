@@ -484,8 +484,10 @@ func (s *levelsController) compactBuildTables(
 	updateStats := func(vs y.ValueStruct) {
 		if vs.Meta&bitValuePointer > 0 {
 			var vp valuePointer
-			vp.Decode(vs.Value)
-			discardStats[vp.Fid] += int64(vp.Len)
+			if len(vs.Value) > 0 {
+				vp.Decode(vs.Value)
+				discardStats[vp.Fid] += int64(vp.Len)
+			}
 		}
 	}
 
@@ -530,7 +532,6 @@ nextTable:
 	var newTables []*table.Table
 	mu := new(sync.Mutex) // Guards newTables
 	inflightBuilders := y.NewThrottle(5)
-	var vp valuePointer
 
 	var numBuilds, numVersions int
 	var lastKey, skipKey []byte
@@ -612,9 +613,6 @@ nextTable:
 				}
 			}
 			numKeys++
-			if vs.Meta&bitValuePointer > 0 {
-				vp.Decode(vs.Value)
-			}
 			builder.Add(it.Key(), vs)
 		}
 		// It was true that it.Valid() at least once in the loop above, which means we
