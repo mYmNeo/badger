@@ -1307,7 +1307,7 @@ func (db *DB) Flatten(workers int) error {
 	}
 
 	hbytes := func(sz int64) string {
-		return humanize.Bytes(uint64(sz))
+		return humanize.IBytes(uint64(sz))
 	}
 
 	for {

@@ -64,6 +64,29 @@ func (r keyRange) overlapsWith(dst keyRange) bool {
 	return true
 }
 
+func (r *keyRange) extend(kr keyRange) {
+	// TODO(ibrahim): Is this needed?
+	if kr.isEmpty() {
+		return
+	}
+	if r.isEmpty() {
+		*r = kr
+	}
+	if len(r.left) == 0 || y.CompareKeys(kr.left, r.left) < 0 {
+		r.left = kr.left
+	}
+	if len(r.right) == 0 || y.CompareKeys(kr.right, r.right) > 0 {
+		r.right = kr.right
+	}
+	if kr.inf {
+		r.inf = true
+	}
+}
+
+func (r *keyRange) isEmpty() bool {
+	return len(r.left) == 0 && len(r.right) == 0 && !r.inf
+}
+
 func getKeyRange(tables ...*table.Table) keyRange {
 	if len(tables) == 0 {
 		return keyRange{}
@@ -165,9 +188,9 @@ func (cs *compactStatus) compareAndAdd(_ thisAndNextLevelRLocked, cd compactDef)
 
 	level := cd.thisLevel.level
 
-	y.AssertTruef(level < len(cs.levels)-1, "Got level %d. Max levels: %d", level, len(cs.levels))
-	thisLevel := cs.levels[level]
-	nextLevel := cs.levels[level+1]
+	y.AssertTruef(level < len(cs.levels), "Got level %d. Max levels: %d", level, len(cs.levels))
+	thisLevel := cs.levels[cd.thisLevel.level]
+	nextLevel := cs.levels[cd.nextLevel.level]
 
 	if thisLevel.overlapsWith(cd.thisRange) {
 		return false
@@ -191,22 +214,27 @@ func (cs *compactStatus) delete(cd compactDef) {
 	defer cs.Unlock()
 
 	level := cd.thisLevel.level
-	y.AssertTruef(level < len(cs.levels)-1, "Got level %d. Max levels: %d", level, len(cs.levels))
+	y.AssertTruef(level < len(cs.levels), "Got level %d. Max levels: %d", level, len(cs.levels))
 
-	thisLevel := cs.levels[level]
-	nextLevel := cs.levels[level+1]
+	thisLevel := cs.levels[cd.thisLevel.level]
+	nextLevel := cs.levels[cd.nextLevel.level]
 
 	thisLevel.delSize -= cd.thisSize
 	found := thisLevel.remove(cd.thisRange)
-	found = nextLevel.remove(cd.nextRange) && found
+	// The following check makes sense only if we're compacting more than one
+	// table. In case of the max level, we might rewrite a single table to
+	// remove stale data.
+	if cd.thisLevel != cd.nextLevel && !cd.nextRange.isEmpty() {
+		found = nextLevel.remove(cd.nextRange) && found
+	}
 
 	if !found {
 		this := cd.thisRange
 		next := cd.nextRange
-		fmt.Printf("Looking for: [%q, %q, %v] in this level.\n", this.left, this.right, this.inf)
+		fmt.Printf("Looking for: %s in this level %d.\n", this, level)
 		fmt.Printf("This Level:\n%s\n", thisLevel.debug())
 		fmt.Println()
-		fmt.Printf("Looking for: [%q, %q, %v] in next level.\n", next.left, next.right, next.inf)
+		fmt.Printf("Looking for: %s in next level %d.\n", next, cd.nextLevel.level)
 		fmt.Printf("Next Level:\n%s\n", nextLevel.debug())
 		log.Fatal("keyRange not found")
 	}

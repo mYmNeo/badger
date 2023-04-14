@@ -365,34 +365,77 @@ func (s *levelsController) runCompactor(id int, lc *y.Closer) {
 		return
 	}
 
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
+	moveL0toFront := func(prios []compactionPriority) []compactionPriority {
+		idx := -1
+		for i, p := range prios {
+			if p.level == 0 {
+				idx = i
+				break
+			}
+		}
+		// If idx == -1, we didn't find L0.
+		// If idx == 0, then we don't need to do anything. L0 is already at the front.
+		if idx > 0 {
+			out := append([]compactionPriority{}, prios[idx])
+			out = append(out, prios[:idx]...)
+			out = append(out, prios[idx+1:]...)
+			return out
+		}
+		return prios
+	}
 
+	run := func(p compactionPriority) bool {
+		s.kv.opt.Debugf("Compaction priority: %+v", p)
+		err := s.doCompact(id, p)
+		switch err {
+		case nil:
+			return true
+		case errFillTables:
+			// pass
+		default:
+			s.kv.opt.Warningf("While running doCompact: %v\n", err)
+		}
+		return false
+	}
+	runOnce := func() bool {
+		prios := s.pickCompactLevels()
+		if id == 0 {
+			// Worker ID zero prefers to compact L0 always.
+			prios = moveL0toFront(prios)
+		}
+		for _, p := range prios {
+			if id == 0 && p.level == 0 {
+				// Allow worker zero to run level 0, irrespective of its adjusted score.
+			} else if p.adjusted < 1.0 {
+				break
+			}
+			if run(p) {
+				return true
+			}
+		}
+
+		return false
+	}
+
+	tryLmaxToLmaxCompaction := func() {
+		p := compactionPriority{
+			level: s.levels[s.kv.opt.MaxLevels-1].level,
+		}
+		run(p)
+	}
+
+	count := 0
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
 	for {
 		select {
 		// Can add a done channel or other stuff.
 		case <-ticker.C:
-			prios := s.pickCompactLevels()
-		loop:
-			for _, p := range prios {
-				if id == 0 && p.level > 1 {
-					// If I'm ID zero, I only compact L0 and L1.
-					continue
-				}
-				if id != 0 && p.level <= 1 {
-					// If I'm ID non-zero, I do NOT compact L0 and L1.
-					continue
-				}
-				err := s.doCompact(id, p)
-				switch err {
-				case nil:
-					break loop
-				case errFillTables:
-					// pass
-				default:
-					s.kv.opt.Warningf("While running doCompact: %v\n", err)
-				}
+			count++
+			if count%200 == 0 {
+				tryLmaxToLmaxCompaction()
 			}
+			runOnce()
 		case <-lc.HasBeenClosed():
 			return
 		}
@@ -415,6 +458,7 @@ func (l *levelHandler) isCompactable(delSize int64) bool {
 type compactionPriority struct {
 	level        int
 	score        float64
+	adjusted     float64
 	dropPrefixes [][]byte
 }
 
@@ -424,29 +468,62 @@ func (s *levelsController) pickCompactLevels() (prios []compactionPriority) {
 	// This function must use identical criteria for guaranteeing compaction's progress that
 	// addLevel0Table uses.
 
-	// cstatus is checked to see if level 0's tables are already being compacted
-	if !s.cstatus.overlapsWith(0, infRange) && s.isLevel0Compactable() {
+	addPriority := func(level int, score float64) {
 		pri := compactionPriority{
-			level: 0,
-			score: float64(s.levels[0].numTables()) / float64(s.kv.opt.NumLevelZeroTables),
+			level:    level,
+			score:    score,
+			adjusted: score,
 		}
 		prios = append(prios, pri)
 	}
 
-	for i, l := range s.levels[1:] {
+	addPriority(0, float64(s.levels[0].numTables())/float64(s.kv.opt.NumLevelZeroTables))
+	for i := 1; i < len(s.levels); i++ {
 		// Don't consider those tables that are already being compacted right now.
-		delSize := s.cstatus.delSize(i + 1)
+		delSize := s.cstatus.delSize(i)
+		l := s.levels[i]
+		sz := l.getTotalSize() - delSize
+		addPriority(i, float64(sz)/float64(l.maxTotalSize))
+	}
+	y.AssertTrue(len(prios) == len(s.levels))
 
-		if l.isCompactable(delSize) {
-			pri := compactionPriority{
-				level: i + 1,
-				score: float64(l.getTotalSize()-delSize) / float64(l.maxTotalSize),
+	// The following code is borrowed from PebbleDB and results in healthier LSM tree structure.
+	// If Li-1 has score > 1.0, then we'll divide Li-1 score by Li. If Li score is >= 1.0, then Li-1
+	// score is reduced, which means we'll prioritize the compaction of lower levels (L5, L4 and so
+	// on) over the higher levels (L0, L1 and so on). On the other hand, if Li score is < 1.0, then
+	// we'll increase the priority of Li-1.
+	// Overall what this means is, if the bottom level is already overflowing, then de-prioritize
+	// compaction of the above level. If the bottom level is not full, then increase the priority of
+	// above level.
+	var prevLevel int
+	for level := 0; level < len(s.levels); level++ {
+		if prios[prevLevel].adjusted >= 1 {
+			// Avoid absurdly large scores by placing a floor on the score that we'll
+			// adjust a level by. The value of 0.01 was chosen somewhat arbitrarily
+			const minScore = 0.01
+			if prios[level].score >= minScore {
+				prios[prevLevel].adjusted /= prios[level].adjusted
+			} else {
+				prios[prevLevel].adjusted /= minScore
 			}
-			prios = append(prios, pri)
+		}
+		prevLevel = level
+	}
+
+	// Pick all the levels whose original score is >= 1.0, irrespective of their adjusted score.
+	// We'll still sort them by their adjusted score below. Having both these scores allows us to
+	// make better decisions about compacting L0. If we see a score >= 1.0, we can do L0->L0
+	// compactions. If the adjusted score >= 1.0, then we can do L0->Lbase compactions.
+	out := prios[:0]
+	for _, p := range prios[:len(prios)-1] {
+		if p.score >= 1.0 {
+			out = append(out, p)
 		}
 	}
+	prios = out
+	// Sort by the adjusted score.
 	sort.Slice(prios, func(i, j int) bool {
-		return prios[i].score > prios[j].score
+		return prios[i].adjusted > prios[j].adjusted
 	})
 	return prios
 }
@@ -844,6 +921,51 @@ func (s *levelsController) sortByOverlap(tables []*table.Table, cd *compactDef) 
 	})
 }
 
+func (s *levelsController) fillMaxLevelTables(tables []*table.Table, cd *compactDef) bool {
+	sortedTables := make([]*table.Table, len(tables))
+	copy(sortedTables, tables)
+
+	cd.bot = []*table.Table{}
+	collectBotTables := func(t *table.Table) {
+		j := sort.Search(len(tables), func(i int) bool {
+			return y.CompareKeys(tables[i].Smallest(), t.Smallest()) >= 0
+		})
+		y.AssertTrue(tables[j].ID() == t.ID())
+		j++
+		for j < len(tables) {
+			cd.bot = append(cd.bot, tables[j])
+			cd.nextRange.extend(getKeyRange(tables[j]))
+			j++
+		}
+	}
+	for _, t := range sortedTables {
+		cd.thisSize = t.Size()
+		cd.thisRange = getKeyRange(t)
+		// Set the next range as the same as the current range. If we don't do
+		// this, we won't be able to run more than one max level compactions.
+		cd.nextRange = cd.thisRange
+		// If we're already compacting this range, don't do anything.
+		if s.cstatus.overlapsWith(cd.thisLevel.level, cd.thisRange) {
+			continue
+		}
+
+		// Found a valid table!
+		cd.top = []*table.Table{t}
+		collectBotTables(t)
+		if !s.cstatus.compareAndAdd(thisAndNextLevelRLocked{}, *cd) {
+			cd.bot = cd.bot[:0]
+			cd.nextRange = keyRange{}
+			continue
+		}
+		return true
+	}
+	if len(cd.top) == 0 {
+		return false
+	}
+
+	return s.cstatus.compareAndAdd(thisAndNextLevelRLocked{}, *cd)
+}
+
 func (s *levelsController) fillTables(cd *compactDef) bool {
 	cd.lockLevels()
 	defer cd.unlockLevels()
@@ -852,6 +974,11 @@ func (s *levelsController) fillTables(cd *compactDef) bool {
 	copy(tables, cd.thisLevel.tables)
 	if len(tables) == 0 {
 		return false
+	}
+
+	// We're doing a maxLevel to maxLevel compaction.
+	if cd.thisLevel.level == s.kv.opt.MaxLevels-1 {
+		return s.fillMaxLevelTables(tables, cd)
 	}
 
 	// We want to pick files from current level in order of increasing overlap with next level
@@ -941,12 +1068,11 @@ var errFillTables = errors.New("Unable to fill tables")
 // doCompact picks some table on level l and compacts it away to the next level.
 func (s *levelsController) doCompact(id int, p compactionPriority) error {
 	l := p.level
-	y.AssertTrue(l+1 < s.kv.opt.MaxLevels) // Sanity check.
+	y.AssertTrue(l < s.kv.opt.MaxLevels) // Sanity check.
 
 	cd := compactDef{
 		elog:         trace.New(fmt.Sprintf("Badger.L%d", l), "Compact"),
 		thisLevel:    s.levels[l],
-		nextLevel:    s.levels[l+1],
 		dropPrefixes: p.dropPrefixes,
 	}
 	cd.elog.SetMaxEvents(100)
@@ -957,11 +1083,16 @@ func (s *levelsController) doCompact(id int, p compactionPriority) error {
 	// While picking tables to be compacted, both levels' tables are expected to
 	// remain unchanged.
 	if l == 0 {
+		cd.nextLevel = s.levels[l+1]
 		if !s.fillTablesL0(&cd) {
 			return errFillTables
 		}
-
 	} else {
+		cd.nextLevel = cd.thisLevel
+		// We're not compacting the last level so pick the next level.
+		if cd.thisLevel.level != s.kv.opt.MaxLevels-1 {
+			cd.nextLevel = s.levels[l+1]
+		}
 		if !s.fillTables(&cd) {
 			return errFillTables
 		}
