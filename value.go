@@ -1423,9 +1423,9 @@ func (vlog *valueLog) doRunGC(lf *logFile, discardRatio float64, tr trace.Trace)
 		r.total += esz
 		r.count++
 
-		vs, err := vlog.db.get(vlog.getSearchKey(keyBuf, e.Key, readTs))
-		if err != nil {
-			return err
+		vs, ierr := vlog.db.get(vlog.getSearchKey(keyBuf, e.Key, readTs))
+		if ierr != nil {
+			return ierr
 		}
 
 		if discardEntry(e, vs, vlog.db) {
@@ -1453,13 +1453,13 @@ func (vlog *valueLog) doRunGC(lf *logFile, discardRatio float64, tr trace.Trace)
 		} else {
 			vlog.elog.Printf("Reason=%+v\n", r)
 
-			buf, cb, err := vlog.readValueBytes(vp, s)
-			if err != nil {
+			buf, cb, rerr := vlog.readValueBytes(vp, s)
+			if rerr != nil {
 				return errStop
 			}
-			ne, err := valueBytesToEntry(buf)
-			if err != nil {
-				return err
+			ne, perr := valueBytesToEntry(buf)
+			if perr != nil {
+				return perr
 			}
 			ne.offset = vp.Offset
 			ne.print("Latest Entry Header in LSM")
@@ -1534,8 +1534,10 @@ func (vlog *valueLog) runGC(discardRatio float64, head valuePointer) error {
 				continue
 			}
 			tried[lf.fid] = true
+			vlog.opt.Logger.Infof("Running garbage collection on log: %s", lf.path)
 			err = vlog.doRunGC(lf, discardRatio, tr)
 			if err != nil && err != ErrNoRewrite {
+				vlog.opt.Logger.Errorf("Error while doing GC on log: %s. Error: %v", lf.path, err)
 				break
 			}
 		}
