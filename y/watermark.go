@@ -51,8 +51,8 @@ type mark struct {
 
 // WaterMark is used to keep track of the minimum un-finished index.  Typically, an index k becomes
 // finished or "done" according to a WaterMark once Done(k) has been called
-//   1. as many times as Begin(k) has, AND
-//   2. a positive number of times.
+//  1. as many times as Begin(k) has, AND
+//  2. a positive number of times.
 //
 // An index may also become "done" by calling SetDoneUntil at a time such that it is not
 // inter-mingled with Begin/Done calls.
@@ -243,7 +243,8 @@ func (w *WaterMark) process(closer *Closer) {
 					}
 				}
 			} else {
-				if mark.index > 0 {
+				// it is possible that mark.index is zero. We need to handle that case as well.
+				if mark.index > 0 || (mark.index == 0 && len(mark.indices) == 0) {
 					processOne(mark.index, mark.done)
 				}
 				for _, index := range mark.indices {
