@@ -373,19 +373,13 @@ func (vlog *valueLog) rewrite(f *logFile, tr trace.Trace) error {
 
 	y.AssertTrue(vlog.db != nil)
 	var count int
-	var readTs uint64
-
-	if !vlog.db.opt.managedTxns {
-		readTs = vlog.db.orc.readTs()
-	}
-	keyBuf := bytes.NewBuffer(make([]byte, 0, 1<<20))
 	fe := func(e Entry) error {
 		count++
 		if count%100000 == 0 {
 			tr.LazyPrintf("Processing entry %d", count)
 		}
 
-		vs, err := vlog.db.get(vlog.getSearchKey(keyBuf, e.Key, readTs))
+		vs, err := vlog.db.get(e.Key)
 		if err != nil {
 			return err
 		}
@@ -1361,17 +1355,9 @@ func (vlog *valueLog) pickLog(head valuePointer, tr trace.Trace) (files []*logFi
 }
 
 func discardEntry(e Entry, vs y.ValueStruct, db *DB) bool {
-	ver := y.ParseTs(e.Key)
-	if vs.Version != ver {
+	if vs.Version != y.ParseTs(e.Key) {
 		// Version not found. Discard.
 		return true
-	}
-
-	if db.opt.managedTxns && db.opt.NumVersionsToKeep == 1 {
-		if ver < vs.Version {
-			// Remove old version
-			return true
-		}
 	}
 
 	if isDeletedOrExpired(vs.Meta, vs.ExpiresAt) {
@@ -1408,22 +1394,14 @@ func (vlog *valueLog) doRunGC(lf *logFile, discardRatio float64, tr trace.Trace)
 	var r reason
 	y.AssertTrue(vlog.db != nil)
 	s := new(y.Slice)
-	var (
-		numIterations int
-		readTs        uint64
-	)
-
-	if !vlog.db.opt.managedTxns {
-		readTs = vlog.db.orc.readTs()
-	}
-	keyBuf := bytes.NewBuffer(make([]byte, 0, 1<<20))
+	var numIterations int
 	_, err = vlog.iterate(lf, 0, func(e Entry, vp valuePointer) error {
 		numIterations++
 		esz := vp.Len
 		r.total += esz
 		r.count++
 
-		vs, ierr := vlog.db.get(vlog.getSearchKey(keyBuf, e.Key, readTs))
+		vs, ierr := vlog.db.get(e.Key)
 		if ierr != nil {
 			return ierr
 		}
@@ -1491,14 +1469,6 @@ func (vlog *valueLog) doRunGC(lf *logFile, discardRatio float64, tr trace.Trace)
 	}
 	tr.LazyPrintf("Done rewriting.")
 	return nil
-}
-
-func (vlog *valueLog) getSearchKey(out *bytes.Buffer, key []byte, ts uint64) []byte {
-	if ts > 0 {
-		return y.KeyWithTsBuffer(out, y.ParseKey(key), ts)
-	}
-
-	return key
 }
 
 func (vlog *valueLog) waitOnGC(lc *y.Closer) {
