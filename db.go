@@ -86,6 +86,7 @@ type DB struct {
 	logRotates int32
 
 	blockWrites int32
+	isClosed    uint32
 
 	orc *oracle
 
@@ -366,6 +367,12 @@ func (db *DB) Close() error {
 	return err
 }
 
+// IsClosed denotes if the badger DB is closed or not. A DB instance should not
+// be used after closing it.
+func (db *DB) IsClosed() bool {
+	return atomic.LoadUint32(&db.isClosed) == 1
+}
+
 func (db *DB) close() (err error) {
 	db.elog.Printf("Closing database")
 
@@ -445,6 +452,8 @@ func (db *DB) close() (err error) {
 
 	db.elog.Finish()
 
+	atomic.StoreUint32(&db.isClosed, 1)
+
 	if db.dirLockGuard != nil {
 		if guardErr := db.dirLockGuard.release(); err == nil {
 			err = errors.Wrap(guardErr, "DB.Close")
@@ -521,6 +530,9 @@ func (db *DB) getMemTables() ([]*skl.Skiplist, func()) {
 // for "fooX" in all the levels of the LSM tree. This is expensive but it
 // removes the overhead of handling move keys completely.
 func (db *DB) get(key []byte) (y.ValueStruct, error) {
+	if db.IsClosed() {
+		return y.ValueStruct{}, ErrDBClosed
+	}
 	tables, decr := db.getMemTables() // Lock should be released.
 	defer decr()
 

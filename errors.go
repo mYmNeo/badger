@@ -112,4 +112,7 @@ var (
 
 	// ErrNilCallback is returned when subscriber's callback is nil.
 	ErrNilCallback = errors.New("Callback cannot be nil")
+
+	// ErrDBClosed is returned when a get operation is performed after closing the DB.
+	ErrDBClosed = errors.New("DB Closed")
 )
