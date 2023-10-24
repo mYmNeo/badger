@@ -18,9 +18,9 @@ package table
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"os"
 	"path"
@@ -154,7 +154,7 @@ func OpenTable(fd *os.File, mode options.FileLoadingMode, cksum []byte) (*Table,
 		return nil, fmt.Errorf(
 			"CHECKSUM_MISMATCH: Table checksum does not match checksum in MANIFEST."+
 				" NOT including table %s. This would lead to missing data."+
-				"\n  sha256 %x Expected\n  sha256 %x Found\n", filename, cksum, t.Checksum)
+				"\n  crc32 %x Expected\n  crc32 %x Found\n", filename, cksum, t.Checksum)
 	}
 	if err := t.readIndex(); err != nil {
 		return nil, y.Wrap(err)
@@ -349,7 +349,7 @@ func (t *Table) loadToRAM() error {
 		return err
 	}
 	t.mmap = make([]byte, t.tableSize)
-	sum := sha256.New()
+	sum := crc32.New(crc32.MakeTable(crc32.Castagnoli))
 	tee := io.TeeReader(t.fd, sum)
 	read, err := tee.Read(t.mmap)
 	if err != nil || read != t.tableSize {
