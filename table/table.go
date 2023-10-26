@@ -129,33 +129,39 @@ func OpenTable(fd *os.File, mode options.FileLoadingMode, cksum []byte) (*Table,
 		return nil, y.Wrap(err)
 	}
 
-	filename := fileInfo.Name()
-	id, ok := ParseFileID(filename)
+	id, ok := ParseFileID(fileInfo.Name())
 	if !ok {
 		_ = fd.Close()
-		return nil, errors.Errorf("Invalid filename: %s", filename)
+		return nil, errors.Errorf("Invalid filename: %s", fileInfo.Name())
 	}
 	t := &Table{
 		fd:          fd,
+		tableSize:   int(fileInfo.Size()),
 		ref:         1, // Caller is given one reference.
 		id:          id,
 		loadingMode: mode,
 	}
 
-	t.tableSize = int(fileInfo.Size())
+	switch mode {
+	case options.LoadToRAM:
+		if err := t.loadToRAM(); err != nil {
+			return nil, err
+		}
+	case options.MemoryMap:
+		t.mmap, err = y.Mmap(fd, false, fileInfo.Size())
+		if err != nil {
+			_ = fd.Close()
+			return nil, y.Wrapf(err, "Unable to map file: %q", fileInfo.Name())
+		}
+	case options.FileIO:
+	default:
+		panic(fmt.Sprintf("Invalid loading mode: %v", mode))
+	}
 
-	// We first load to RAM, so we can read the index and do checksum.
-	if err := t.loadToRAM(); err != nil {
-		return nil, err
+	if err := t.verifyChecksum(cksum); err != nil {
+		return nil, y.Wrap(err)
 	}
-	// Enforce checksum before we read index. Otherwise, if the file was
-	// truncated, we'd end up with panics in readIndex.
-	if len(cksum) > 0 && !bytes.Equal(t.Checksum, cksum) {
-		return nil, fmt.Errorf(
-			"CHECKSUM_MISMATCH: Table checksum does not match checksum in MANIFEST."+
-				" NOT including table %s. This would lead to missing data."+
-				"\n  crc32 %x Expected\n  crc32 %x Found\n", filename, cksum, t.Checksum)
-	}
+
 	if err := t.readIndex(); err != nil {
 		return nil, y.Wrap(err)
 	}
@@ -174,20 +180,6 @@ func OpenTable(fd *os.File, mode options.FileLoadingMode, cksum []byte) (*Table,
 		t.biggest = y.Copy(it2.Key())
 	}
 
-	switch mode {
-	case options.LoadToRAM:
-		// No need to do anything. t.mmap is already filled.
-	case options.MemoryMap:
-		t.mmap, err = y.Mmap(fd, false, fileInfo.Size())
-		if err != nil {
-			_ = fd.Close()
-			return nil, y.Wrapf(err, "Unable to map file: %q", fileInfo.Name())
-		}
-	case options.FileIO:
-		t.mmap = nil
-	default:
-		panic(fmt.Sprintf("Invalid loading mode: %v", mode))
-	}
 	return t, nil
 }
 
@@ -225,9 +217,6 @@ func (t *Table) readNoFail(off, sz int) []byte {
 }
 
 func (t *Table) readIndex() error {
-	if len(t.mmap) != t.tableSize {
-		panic("Table size does not match the read bytes")
-	}
 	readPos := t.tableSize
 
 	// Read bloom filter.
@@ -349,14 +338,40 @@ func (t *Table) loadToRAM() error {
 		return err
 	}
 	t.mmap = make([]byte, t.tableSize)
-	sum := crc32.New(crc32.MakeTable(crc32.Castagnoli))
-	tee := io.TeeReader(t.fd, sum)
-	read, err := tee.Read(t.mmap)
+	read, err := t.fd.Read(t.mmap)
 	if err != nil || read != t.tableSize {
 		return y.Wrapf(err, "Unable to load file in memory. Table file: %s", t.Filename())
 	}
-	t.Checksum = sum.Sum(nil)
+
+	return nil
+}
+
+func (t *Table) verifyChecksum(cksum []byte) error {
+	sum := crc32.New(crc32.MakeTable(crc32.Castagnoli))
+	if len(t.mmap) > 0 {
+		readSize, err := sum.Write(t.mmap)
+		if err != nil || readSize != t.tableSize {
+			return y.Wrapf(err, "Unable to calculate checksum. Table file: %s", t.Filename())
+		}
+		y.NumBytesRead.Add(int64(readSize))
+	} else {
+		readBytes, err := io.ReadAll(io.TeeReader(t.fd, sum))
+		if err != nil || len(readBytes) != t.tableSize {
+			return y.Wrapf(err, "Unable to calculate checksum. Table file: %s", t.Filename())
+		}
+		y.NumBytesRead.Add(int64(len(readBytes)))
+	}
 	y.NumReads.Add(1)
-	y.NumBytesRead.Add(int64(read))
+	t.Checksum = sum.Sum(nil)
+
+	// Enforce checksum before we read index. Otherwise, if the file was
+	// truncated, we'd end up with panics in readIndex.
+	if len(cksum) > 0 && !bytes.Equal(t.Checksum, cksum) {
+		return fmt.Errorf(
+			"CHECKSUM_MISMATCH: Table checksum does not match checksum in MANIFEST."+
+				" NOT including table %s. This would lead to missing data."+
+				"\n  crc32 %x Expected\n  crc32 %x Found\n", t.Filename(), cksum, t.Checksum)
+	}
+
 	return nil
 }
