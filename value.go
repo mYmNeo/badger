@@ -26,6 +26,7 @@ import (
 	"io"
 	"io/ioutil"
 	"math"
+	"math/rand"
 	"os"
 	"sort"
 	"strconv"
@@ -1351,6 +1352,10 @@ func (vlog *valueLog) pickLog(head valuePointer, tr trace.Trace) (files []*logFi
 		}
 	}
 
+	rand.Shuffle(len(files), func(i, j int) {
+		files[i], files[j] = files[j], files[i]
+	})
+
 	return files
 }
 
@@ -1506,7 +1511,7 @@ func (vlog *valueLog) runGC(discardRatio float64, head valuePointer) error {
 			tried[lf.fid] = true
 			vlog.opt.Logger.Infof("Running garbage collection on log: %s", lf.path)
 			err = vlog.doRunGC(lf, discardRatio, tr)
-			if err != nil && err != ErrNoRewrite {
+			if err != nil {
 				vlog.opt.Logger.Errorf("Error while doing GC on log: %s. Error: %v", lf.path, err)
 				break
 			}
