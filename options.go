@@ -75,6 +75,9 @@ type Options struct {
 	// KVWriteCapacity defines the capacity channel size for write
 	KVWriteCapacity int
 
+	// ValueCompressLevel defines the compression level for the value log files.
+	ValueCompressLevel int
+
 	// Transaction start and commit timestamps are managed by end-user.
 	// This is only useful for databases built on top of Badger (like Dgraph).
 	// Not recommended for most users.
@@ -122,6 +125,7 @@ func DefaultOptions(path string) Options {
 		EventLogging:       true,
 		LogRotatesToFlush:  2,
 		KVWriteCapacity:    1000,
+		ValueCompressLevel: 0,
 	}
 }
 
@@ -429,5 +433,10 @@ func (opt Options) WithBypassLockGuard(b bool) Options {
 // When write channel is full, Badger will block until write channel is flushed out.
 func (opt Options) WithWriteCapacity(writeCapacity int) Options {
 	opt.KVWriteCapacity = writeCapacity
+	return opt
+}
+
+func (opt Options) WithValueCompressLevel(val int) Options {
+	opt.ValueCompressLevel = val
 	return opt
 }

@@ -10,8 +10,6 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/klauspost/compress/s2"
-
 	"github.com/dgraph-io/badger/y"
 )
 
@@ -116,7 +114,7 @@ var crcPool = sync.Pool{
 }
 
 // Encodes e to buf. Returns number of bytes written.
-func encodeEntry(e *Entry, buf *bytes.Buffer) (int, error) {
+func encodeEntry(e *Entry, encoder Encoder, buf *bytes.Buffer) (int, error) {
 	var (
 		key         []byte
 		val         []byte
@@ -124,8 +122,8 @@ func encodeEntry(e *Entry, buf *bytes.Buffer) (int, error) {
 	)
 
 	if e.meta&bitCompression > 0 {
-		key = s2.Encode(nil, e.Key)
-		val = s2.Encode(nil, e.Value)
+		key = encoder(nil, e.Key)
+		val = encoder(nil, e.Value)
 		enabledByte = bitCompression
 	} else {
 		key = e.Key
