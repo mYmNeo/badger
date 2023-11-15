@@ -77,7 +77,8 @@ func TestValueBasic(t *testing.T) {
 	defer runCallback(cb1)
 	defer runCallback(cb2)
 
-	readEntries := []Entry{valueBytesToEntryForTest(buf1), valueBytesToEntryForTest(buf2)}
+	decoder := NewS2Decoder()
+	readEntries := []Entry{valueBytesToEntryForTest(decoder, buf1), valueBytesToEntryForTest(decoder, buf2)}
 	require.EqualValues(t, []Entry{
 		{
 			Key:   []byte("samplekey"),
@@ -971,6 +972,7 @@ func BenchmarkReadWrite(b *testing.B) {
 		64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384,
 	}
 
+	decoder := NewS2Decoder()
 	for _, vsz := range valueSize {
 		for _, rw := range rwRatio {
 			b.Run(fmt.Sprintf("%3.1f,%04d", rw, vsz), func(b *testing.B) {
@@ -1012,7 +1014,7 @@ func BenchmarkReadWrite(b *testing.B) {
 							b.Fatalf("Benchmark Read: %v", err)
 						}
 
-						e, _ := valueBytesToEntry(buf)
+						e, _ := valueBytesToEntry(decoder, buf)
 						if len(e.Key) != 16 {
 							b.Fatalf("Key is invalid")
 						}

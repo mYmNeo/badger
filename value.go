@@ -35,7 +35,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/klauspost/compress/s2"
 	"github.com/pkg/errors"
 	"golang.org/x/net/trace"
 	"golang.org/x/sys/unix"
@@ -201,6 +200,7 @@ type safeRead struct {
 	v []byte
 
 	recordOffset uint32
+	decoder      Decoder
 }
 
 func (r *safeRead) Entry(reader *bufio.Reader) (*Entry, uint32, error) {
@@ -257,11 +257,11 @@ func (r *safeRead) Entry(reader *bufio.Reader) (*Entry, uint32, error) {
 	}
 
 	if h.meta&bitCompression > 0 {
-		e.Key, err = s2.Decode(nil, e.Key)
+		e.Key, err = r.decoder(nil, e.Key)
 		if err != nil {
 			return nil, 0, errDecodeKey
 		}
-		e.Value, err = s2.Decode(nil, e.Value)
+		e.Value, err = r.decoder(nil, e.Value)
 		if err != nil {
 			return nil, 0, errDecodeValue
 		}
@@ -304,6 +304,7 @@ func (vlog *valueLog) iterate(lf *logFile, offset uint32, fn logEntry) (uint32, 
 		k:            make([]byte, 1<<20),
 		v:            make([]byte, 4<<20),
 		recordOffset: offset,
+		decoder:      vlog.decoder,
 	}
 
 	var lastCommit uint64
@@ -686,6 +687,8 @@ type valueLog struct {
 
 	garbageCh      chan struct{}
 	lfDiscardStats *lfDiscardStats
+	encoder        Encoder
+	decoder        Decoder
 }
 
 func vlogFilePath(dirPath string, fid uint32) string {
@@ -836,6 +839,8 @@ func (vlog *valueLog) init(db *DB) {
 			},
 		}
 	})
+	vlog.encoder = NewS2Encoder(vlog.opt.ValueCompressLevel)
+	vlog.decoder = NewS2Decoder()
 }
 
 func (vlog *valueLog) open(db *DB, ptr valuePointer, replayFn logEntry) error {
@@ -1192,7 +1197,7 @@ func (vlog *valueLog) write(reqs []*request) error {
 			p.Fid = curlf.fid
 			// Use the offset including buffer length so far.
 			p.Offset = vlog.woffset() + uint32(buf.Len())
-			plen, err := encodeEntry(e, buf) // Now encode the entry into buffer.
+			plen, err := encodeEntry(e, vlog.encoder, buf) // Now encode the entry into buffer.
 			if err != nil {
 				return err
 			}
@@ -1276,7 +1281,7 @@ func (vlog *valueLog) Read(vp valuePointer, s *y.Slice) ([]byte, func(), error) 
 	n := uint32(headerBufSize) + h.klen
 	val = buf[n : n+h.vlen]
 	if h.meta&bitCompression > 0 {
-		val, err = s2.Decode(nil, buf[n:n+h.vlen])
+		val, err = vlog.decoder(nil, buf[n:n+h.vlen])
 		if err != nil {
 			runCallback(cb)
 			return nil, nil, errors.Wrapf(err, "failed to decompress value for vp %+v", vp)
@@ -1302,7 +1307,7 @@ func (vlog *valueLog) readValueBytes(vp valuePointer, s *y.Slice) ([]byte, func(
 }
 
 // Test helper
-func valueBytesToEntry(buf []byte) (e Entry, err error) {
+func valueBytesToEntry(decoder Decoder, buf []byte) (e Entry, err error) {
 	var h header
 	h.Decode(buf)
 	n := uint32(headerBufSize)
@@ -1314,11 +1319,11 @@ func valueBytesToEntry(buf []byte) (e Entry, err error) {
 	e.Value = buf[n : n+h.vlen]
 
 	if e.meta&bitCompression > 0 {
-		e.Key, err = s2.Decode(nil, e.Key)
+		e.Key, err = decoder(nil, e.Key)
 		if err != nil {
 			return e, err
 		}
-		e.Value, err = s2.Decode(nil, e.Value)
+		e.Value, err = decoder(nil, e.Value)
 		if err != nil {
 			return e, err
 		}
@@ -1326,8 +1331,8 @@ func valueBytesToEntry(buf []byte) (e Entry, err error) {
 	return
 }
 
-func valueBytesToEntryForTest(buf []byte) (e Entry) {
-	e, _ = valueBytesToEntry(buf)
+func valueBytesToEntryForTest(decoder Decoder, buf []byte) (e Entry) {
+	e, _ = valueBytesToEntry(decoder, buf)
 	return
 }
 
@@ -1440,7 +1445,7 @@ func (vlog *valueLog) doRunGC(lf *logFile, discardRatio float64, tr trace.Trace)
 			if rerr != nil {
 				return errStop
 			}
-			ne, perr := valueBytesToEntry(buf)
+			ne, perr := valueBytesToEntry(vlog.decoder, buf)
 			if perr != nil {
 				return perr
 			}
