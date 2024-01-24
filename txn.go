@@ -622,6 +622,8 @@ func (txn *Txn) CommitWith(cb func(error)) {
 		// callback might be acquiring the same locks. Instead run the callback
 		// from another goroutine.
 		go runTxnCallback(&txnCb{user: cb, err: nil})
+		// Discard the transaction so that the read is marked done.
+		txn.Discard()
 		return
 	}
 
