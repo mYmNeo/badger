@@ -564,6 +564,8 @@ func (txn *Txn) commitPrecheck() error {
 // tree won't be updated, so there's no need for any rollback.
 func (txn *Txn) Commit() error {
 	if len(txn.writes) == 0 {
+		// Discard the transaction so that the read is marked done.
+		txn.Discard()
 		return nil // Nothing to do.
 	}
 
