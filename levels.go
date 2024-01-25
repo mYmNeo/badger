@@ -397,8 +397,13 @@ func (s *levelsController) runCompactor(id int, lc *y.Closer) {
 		}
 		return false
 	}
+
+	var priosBuffer []compactionPriority
 	runOnce := func() bool {
-		prios := s.pickCompactLevels()
+		prios := s.pickCompactLevels(priosBuffer)
+		defer func() {
+			priosBuffer = prios
+		}()
 		if id == 0 {
 			// Worker ID zero prefers to compact L0 always.
 			prios = moveL0toFront(prios)
@@ -464,7 +469,7 @@ type compactionPriority struct {
 
 // pickCompactLevel determines which level to compact.
 // Based on: https://github.com/facebook/rocksdb/wiki/Leveled-Compaction
-func (s *levelsController) pickCompactLevels() (prios []compactionPriority) {
+func (s *levelsController) pickCompactLevels(priosBuffer []compactionPriority) (prios []compactionPriority) {
 	// This function must use identical criteria for guaranteeing compaction's progress that
 	// addLevel0Table uses.
 
@@ -476,6 +481,12 @@ func (s *levelsController) pickCompactLevels() (prios []compactionPriority) {
 		}
 		prios = append(prios, pri)
 	}
+
+	// Grow buffer to fit all levels.
+	if cap(priosBuffer) < len(s.levels) {
+		priosBuffer = make([]compactionPriority, 0, len(s.levels))
+	}
+	prios = priosBuffer[:0]
 
 	addPriority(0, float64(s.levels[0].numTables())/float64(s.kv.opt.NumLevelZeroTables))
 	for i := 1; i < len(s.levels); i++ {
