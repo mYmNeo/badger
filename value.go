@@ -1513,10 +1513,15 @@ func (vlog *valueLog) runGC(discardRatio float64, head valuePointer) error {
 			if _, done := tried[lf.fid]; done {
 				continue
 			}
+
 			tried[lf.fid] = true
+			if len(tried) > vlog.opt.NumMaxGCFile {
+				break
+			}
+
 			vlog.opt.Logger.Infof("Running garbage collection on log: %s", lf.path)
 			err = vlog.doRunGC(lf, discardRatio, tr)
-			if err != nil {
+			if err != nil && err != ErrNoRewrite {
 				vlog.opt.Logger.Errorf("Error while doing GC on log: %s. Error: %v", lf.path, err)
 				break
 			}
