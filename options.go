@@ -78,6 +78,9 @@ type Options struct {
 	// ValueCompressLevel defines the compression level for the value log files.
 	ValueCompressLevel int
 
+	// NumMaxGCFile defines the maximum number of garbage collection files
+	NumMaxGCFile int
+
 	// Transaction start and commit timestamps are managed by end-user.
 	// This is only useful for databases built on top of Badger (like Dgraph).
 	// Not recommended for most users.
@@ -126,6 +129,7 @@ func DefaultOptions(path string) Options {
 		LogRotatesToFlush:  2,
 		KVWriteCapacity:    1000,
 		ValueCompressLevel: 0,
+		NumMaxGCFile:       1,
 	}
 }
 
@@ -438,5 +442,10 @@ func (opt Options) WithWriteCapacity(writeCapacity int) Options {
 
 func (opt Options) WithValueCompressLevel(val int) Options {
 	opt.ValueCompressLevel = val
+	return opt
+}
+
+func (opt Options) WithNumMaxGCFile(val int) Options {
+	opt.NumMaxGCFile = val
 	return opt
 }
