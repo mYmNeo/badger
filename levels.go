@@ -566,19 +566,6 @@ func (s *levelsController) compactBuildTables(
 	// compacted in this compaction.
 	hasOverlap := s.checkOverlap(cd.allTables(), cd.nextLevel.level+1)
 
-	// Try to collect stats so that we can inform value log about GC. That would help us find which
-	// value log file should be GCed.
-	discardStats := make(map[uint32]int64)
-	updateStats := func(vs y.ValueStruct) {
-		if vs.Meta&bitValuePointer > 0 {
-			var vp valuePointer
-			if len(vs.Value) > 0 {
-				vp.Decode(vs.Value)
-				discardStats[vp.Fid] += int64(vp.Len)
-			}
-		}
-	}
-
 	// Create iterators across all the tables involved first.
 	var iters []y.Iterator
 	if lev == 0 {
@@ -632,7 +619,6 @@ nextTable:
 			// See if we need to skip the prefix.
 			if len(cd.dropPrefixes) > 0 && hasAnyPrefixes(it.Key(), cd.dropPrefixes) {
 				numSkips++
-				updateStats(it.Value())
 				continue
 			}
 
@@ -640,7 +626,6 @@ nextTable:
 			if len(skipKey) > 0 {
 				if y.SameKey(it.Key(), skipKey) {
 					numSkips++
-					updateStats(it.Value())
 					continue
 				} else {
 					skipKey = skipKey[:0]
@@ -695,7 +680,6 @@ nextTable:
 					default:
 						// If no overlap, we can skip all the versions, by continuing here.
 						numSkips++
-						updateStats(vs)
 						continue // Skip adding this key.
 					}
 				}
@@ -772,8 +756,6 @@ nextTable:
 	sort.Slice(newTables, func(i, j int) bool {
 		return y.CompareKeys(newTables[i].Biggest(), newTables[j].Biggest()) < 0
 	})
-	s.kv.vlog.updateDiscardStats(discardStats)
-	s.kv.opt.Debugf("Discard stats: %v", discardStats)
 	return newTables, func() error { return decrRefs(newTables) }, nil
 }
 

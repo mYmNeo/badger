@@ -340,37 +340,6 @@ func TestPushValueLogLimit(t *testing.T) {
 	})
 }
 
-// Regression test for https://github.com/dgraph-io/badger/issues/830
-func TestDiscardMapTooBig(t *testing.T) {
-	createDiscardStats := func() map[uint32]int64 {
-		stat := map[uint32]int64{}
-		for i := uint32(0); i < 8000; i++ {
-			stat[i] = 0
-		}
-		return stat
-	}
-	dir, err := ioutil.TempDir("", "badger-test")
-	require.NoError(t, err)
-	defer removeDir(dir)
-
-	db, err := Open(DefaultOptions(dir))
-	require.NoError(t, err, "error while opening db")
-
-	// Add some data so that memtable flush happens on close.
-	require.NoError(t, db.Update(func(txn *Txn) error {
-		return txn.Set([]byte("foo"), []byte("bar"))
-	}))
-
-	// overwrite discardstat with large value
-	db.vlog.lfDiscardStats.m = createDiscardStats()
-
-	require.NoError(t, db.Close())
-	// reopen the same DB
-	db, err = Open(DefaultOptions(dir))
-	require.NoError(t, err, "error while opening db")
-	require.NoError(t, db.Close())
-}
-
 // Test for values of size uint32.
 func TestBigValues(t *testing.T) {
 	if !*manual {

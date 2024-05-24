@@ -17,17 +17,14 @@
 package badger
 
 import (
-	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"math/rand"
 	"os"
-	"reflect"
 	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/dustin/go-humanize"
 	"github.com/stretchr/testify/require"
@@ -499,71 +496,6 @@ func TestValueGC5(t *testing.T) {
 
 	_, err = os.Stat(lf.path)
 	require.True(t, os.IsNotExist(err))
-}
-
-func TestPersistLFDiscardStats(t *testing.T) {
-	dir, err := ioutil.TempDir("", "badger-test")
-	require.NoError(t, err)
-	defer removeDir(dir)
-	opt := getTestOptions(dir)
-	opt.ValueLogFileSize = 1 << 20
-	opt.Truncate = true
-	// avoid compaction on close, so that discard map remains same
-	opt.CompactL0OnClose = false
-
-	db, err := Open(opt)
-	require.NoError(t, err)
-
-	sz := 128 << 10 // 5 entries per value log file.
-	v := make([]byte, sz)
-	rand.Read(v[:rand.Intn(sz)])
-	txn := db.NewTransaction(true)
-	for i := 0; i < 500; i++ {
-		require.NoError(t, txn.SetEntry(NewEntry([]byte(fmt.Sprintf("key%d", i)), v)))
-		if i%3 == 0 {
-			require.NoError(t, txn.Commit())
-			txn = db.NewTransaction(true)
-		}
-	}
-	require.NoError(t, txn.Commit(), "error while committing txn")
-
-	for i := 0; i < 500; i++ {
-		// use Entry.WithDiscard() to delete entries, because this causes data to be flushed on
-		// disk, creating SSTs. Simple Delete was having data in Memtables only.
-		err = db.Update(func(txn *Txn) error {
-			return txn.SetEntry(NewEntry([]byte(fmt.Sprintf("key%d", i)), v).WithDiscard())
-		})
-		require.NoError(t, err)
-	}
-
-	time.Sleep(1 * time.Second) // wait for compaction to complete
-
-	persistedMap := make(map[uint32]int64)
-	db.vlog.lfDiscardStats.Lock()
-	require.True(t, len(db.vlog.lfDiscardStats.m) > 0, "some discardStats should be generated")
-	for k, v := range db.vlog.lfDiscardStats.m {
-		persistedMap[k] = v
-	}
-	db.vlog.lfDiscardStats.updatesSinceFlush = discardStatsFlushThreshold + 1
-	db.vlog.lfDiscardStats.Unlock()
-
-	// db.vlog.lfDiscardStats.updatesSinceFlush is already > discardStatsFlushThreshold,
-	// send empty map to flushChan, so that latest discardStats map can be persisted.
-	db.vlog.lfDiscardStats.flushChan <- map[uint32]int64{}
-	time.Sleep(1 * time.Second) // Wait for map to be persisted.
-	err = db.Close()
-	require.NoError(t, err)
-
-	// Avoid running compactors on reopening badger.
-	opt.NumCompactors = 0
-	db, err = Open(opt)
-	require.NoError(t, err)
-	defer db.Close()
-	time.Sleep(1 * time.Second) // Wait for discardStats to be populated by populateDiscardStats().
-	db.vlog.lfDiscardStats.RLock()
-	require.True(t, reflect.DeepEqual(persistedMap, db.vlog.lfDiscardStats.m),
-		"Discard maps are not equal")
-	db.vlog.lfDiscardStats.RUnlock()
 }
 
 func TestChecksums(t *testing.T) {
@@ -1088,145 +1020,6 @@ func TestValueLogTruncate(t *testing.T) {
 	require.Equal(t, fileCountBeforeCorruption+1, fileCountAfterCorruption)
 	// Max file ID would point to the last vlog file, which is fid=2 in this case
 	require.Equal(t, 2, int(atomic.LoadUint32(&db.vlog.maxFid)))
-	require.NoError(t, db.Close())
-}
-
-// Regression test for https://github.com/dgraph-io/badger/issues/926
-func TestDiscardStatsMove(t *testing.T) {
-	dir, err := ioutil.TempDir("", "badger-test")
-	require.NoError(t, err)
-	ops := getTestOptions(dir)
-	ops.ValueLogMaxEntries = 1
-	db, err := Open(ops)
-	require.NoError(t, err)
-
-	stat := make(map[uint32]int64, ops.ValueThreshold+10)
-	for i := uint32(0); i < uint32(ops.ValueThreshold+10); i++ {
-		stat[i] = 0
-	}
-
-	db.vlog.lfDiscardStats.Lock()
-	db.vlog.lfDiscardStats.m = stat
-	encodedDS, _ := json.Marshal(db.vlog.lfDiscardStats.m)
-	db.vlog.lfDiscardStats.Unlock()
-
-	entries := []*Entry{{
-		Key: y.KeyWithTs(lfDiscardStatsKey, 1),
-		// The discard stat value is more than value threshold.
-		Value: encodedDS,
-	}}
-	// Push discard stats entry to the write channel.
-	req, err := db.sendToWriteCh(entries)
-	require.NoError(t, err)
-	req.Wait()
-
-	// Unset discard stats. We've already pushed the stats. If we don't unset it then it will be
-	// pushed again on DB close. Also, the first insertion was in vlog file 1, this insertion would
-	// be in value log file 3.
-	db.vlog.lfDiscardStats.Lock()
-	db.vlog.lfDiscardStats.m = nil
-	db.vlog.lfDiscardStats.Unlock()
-
-	// Push more entries so that we get more than 1 value log files.
-	require.NoError(t, db.Update(func(txn *Txn) error {
-		e := NewEntry([]byte("f"), []byte("1"))
-		return txn.SetEntry(e)
-	}))
-	require.NoError(t, db.Update(func(txn *Txn) error {
-		e := NewEntry([]byte("ff"), []byte("1"))
-		return txn.SetEntry(e)
-
-	}))
-
-	tr := trace.New("Badger.ValueLog", "GC")
-	// Use first value log file for GC. This value log file contains the discard stats.
-	v, ok := db.vlog.filesMap.Load(uint32(0))
-	require.True(t, ok)
-	if ok {
-		lf := v.(*logFile)
-		require.NoError(t, db.vlog.rewrite(lf, tr))
-	}
-	require.NoError(t, db.Close())
-
-	db, err = Open(ops)
-	require.NoError(t, err)
-	// discardStats will be populate using vlog.populateDiscardStats(), which pushes discard stats
-	// to vlog.lfDiscardStats.flushChan. Hence wait for some time, for discard stats to be updated.
-	time.Sleep(1 * time.Second)
-	require.NoError(t, err)
-	db.vlog.lfDiscardStats.RLock()
-	require.Equal(t, stat, db.vlog.lfDiscardStats.m)
-	db.vlog.lfDiscardStats.RUnlock()
-	require.NoError(t, db.Close())
-}
-
-// Regression test for https://github.com/dgraph-io/dgraph/issues/3669
-func TestTruncatedDiscardStat(t *testing.T) {
-	dir, err := ioutil.TempDir("", "badger-test")
-	require.NoError(t, err)
-	ops := getTestOptions(dir)
-	db, err := Open(ops)
-	require.NoError(t, err)
-
-	stat := make(map[uint32]int64, 20)
-	for i := uint32(0); i < uint32(20); i++ {
-		stat[i] = 0
-	}
-
-	db.vlog.lfDiscardStats.m = stat
-	encodedDS, _ := json.Marshal(db.vlog.lfDiscardStats.m)
-	entries := []*Entry{{
-		Key: y.KeyWithTs(lfDiscardStatsKey, 1),
-		// Insert truncated discard stats. This is important.
-		Value: encodedDS[:13],
-	}}
-	// Push discard stats entry to the write channel.
-	req, err := db.sendToWriteCh(entries)
-	require.NoError(t, err)
-	req.Wait()
-
-	// Unset discard stats. We've already pushed the stats. If we don't unset it then it will be
-	// pushed again on DB close.
-	db.vlog.lfDiscardStats.m = nil
-
-	require.NoError(t, db.Close())
-
-	db, err = Open(ops)
-	require.NoError(t, err)
-	require.NoError(t, db.Close())
-}
-
-// This test ensures, flushDiscardStats() doesn't crash.
-func TestBlockedDiscardStats(t *testing.T) {
-	dir, err := ioutil.TempDir("", "badger-test")
-	require.NoError(t, err)
-	defer os.Remove(dir)
-	db, err := Open(getTestOptions(dir))
-	require.NoError(t, err)
-	// Set discard stats.
-	db.vlog.lfDiscardStats.m = map[uint32]int64{0: 0}
-	db.blockWrite()
-	// Push discard stats more than the capacity of flushChan. This ensures at least one flush
-	// operation completes successfully after the writes were blocked.
-	for i := 0; i < cap(db.vlog.lfDiscardStats.flushChan)+2; i++ {
-		db.vlog.lfDiscardStats.flushChan <- db.vlog.lfDiscardStats.m
-	}
-	db.unblockWrite()
-	require.NoError(t, db.Close())
-}
-
-// Regression test for https://github.com/dgraph-io/badger/issues/970
-func TestBlockedDiscardStatsOnClose(t *testing.T) {
-	dir, err := ioutil.TempDir("", "badger-test")
-	require.NoError(t, err)
-	defer removeDir(dir)
-
-	db, err := Open(getTestOptions(dir))
-	require.NoError(t, err)
-	db.vlog.lfDiscardStats.m = map[uint32]int64{0: 0}
-	// This is important. Set updateSinceFlush to discardStatsFlushThreshold so
-	// that the next update call flushes the discard stats.
-	db.vlog.lfDiscardStats.updatesSinceFlush = discardStatsFlushThreshold + 1
 	require.NoError(t, db.Close())
 }
 
