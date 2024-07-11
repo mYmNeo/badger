@@ -1164,7 +1164,7 @@ func (s *levelsController) close() error {
 }
 
 // get returns the found value if any. If not found, we return nil.
-func (s *levelsController) get(key []byte, maxVs *y.ValueStruct) (y.ValueStruct, error) {
+func (s *levelsController) get(key []byte, maxVs *y.ValueStruct, startLevel int) (y.ValueStruct, error) {
 	if s.kv.IsClosed() {
 		return y.ValueStruct{}, ErrDBClosed
 	}
@@ -1175,6 +1175,10 @@ func (s *levelsController) get(key []byte, maxVs *y.ValueStruct) (y.ValueStruct,
 	// number.)
 	version := y.ParseTs(key)
 	for _, h := range s.levels {
+		// Ignore all levels below startLevel. This is useful for GC when L0 is kept in memory.
+		if h.level < startLevel {
+			continue
+		}
 		vs, err := h.get(key) // Calls h.RLock() and h.RUnlock().
 		if err != nil {
 			return y.ValueStruct{}, errors.Wrapf(err, "get key: %q", key)
