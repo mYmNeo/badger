@@ -531,8 +531,6 @@ func (vlog *valueLog) rewrite(f *logFile, tr trace.Trace) error {
 			deleteFileNow = true
 		} else {
 			vlog.filesToBeDeleted.Store(f.fid, struct{}{})
-			vlog.opt.Logger.Infof("Unlink file %s", f.path)
-			vlog.deleteLogFile(f)
 		}
 	}
 
@@ -574,21 +572,6 @@ func (vlog *valueLog) decrIteratorCount() error {
 		if err := vlog.deleteLogFileWithCleanup(lf); err != nil {
 			return err
 		}
-	}
-	return nil
-}
-
-func (vlog *valueLog) deleteLogFile(lf *logFile) error {
-	if lf == nil {
-		return nil
-	}
-	lf.lock.Lock()
-	defer lf.lock.Unlock()
-
-	path := vlog.fpath(lf.fid)
-	os.Remove(path)
-	if lf.fmap != nil {
-		vlog.reclaimMmap(lf)
 	}
 	return nil
 }
