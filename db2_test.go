@@ -667,3 +667,94 @@ func TestIsClosed(t *testing.T) {
 		test()
 	})
 }
+
+// The test ensures we don't lose data when badger is opene and GC is being
+// done.
+func TestL0GCBug(t *testing.T) {
+	dir, err := os.MkdirTemp("", "badger-test")
+	require.NoError(t, err)
+	defer func() {
+		time.Sleep(time.Second)
+		removeDir(dir)
+	}()
+
+	// Do not change any of the options below unless it's necessary.
+	opts := getTestOptions(dir)
+	opts.ValueThreshold = 2
+	opts.ValueLogMaxEntries = 2
+	opts.LogRotatesToFlush = 2
+	// Setting LoadingMode to mmap seems to cause segmentation fault while closing DB.
+	opts.ValueLogLoadingMode = options.FileIO
+	opts.TableLoadingMode = options.FileIO
+	opts.NumMaxGCFile = 10
+	opts.CompactL0OnClose = false
+
+	db1, err := Open(opts)
+	require.NoError(t, err)
+	key := func(i int) []byte {
+		return []byte(fmt.Sprintf("%d", i))
+	}
+	val := []byte{1, 1, 1, 1, 1, 1, 1, 1}
+	// Insert 100 entries. This will create about 50 vlog files and 2 SST files.
+	for i := 0; i < 100; i++ {
+		err = db1.Update(func(txn *Txn) error {
+			return txn.SetEntry(NewEntry(key(i), val))
+		})
+		require.NoError(t, err)
+	}
+
+	t.Logf("Delete all entries")
+	// Delete all entries
+	for i := 0; i < 100; i++ {
+		err = db1.Update(func(txn *Txn) error {
+			return txn.Delete(key(i))
+		})
+		require.NoError(t, err)
+	}
+
+	err = db1.RunValueLogGC(0.01)
+	if err != nil && err != ErrNoRewrite {
+		t.Fatalf(err.Error())
+	}
+
+	// Ensure we all the keys are deleted
+	count := 0
+	for i := 0; i < 100; i++ {
+		db1.View(func(txn *Txn) error {
+			_, err = txn.Get(key(i))
+			if err != ErrKeyNotFound {
+				t.Logf("Key %d found", i)
+				count++
+			}
+			return nil
+		})
+	}
+	require.Equal(t, 0, count)
+
+	// Simulate a crash by not closing db1 but releasing the locks.
+	if db1.dirLockGuard != nil {
+		require.NoError(t, db1.dirLockGuard.release())
+	}
+	if db1.valueDirGuard != nil {
+		require.NoError(t, db1.valueDirGuard.release())
+	}
+	require.NoError(t, db1.vlog.Close())
+
+	db2, err := Open(opts)
+	require.NoError(t, err)
+
+	// Ensure we all the keys are deleted
+	count = 0
+	for i := 0; i < 100; i++ {
+		db2.View(func(txn *Txn) error {
+			_, err = txn.Get(key(i))
+			if err != ErrKeyNotFound {
+				t.Logf("Key %d found", i)
+				count++
+			}
+			return nil
+		})
+	}
+	require.Equal(t, 0, count)
+	require.NoError(t, db2.Close())
+}

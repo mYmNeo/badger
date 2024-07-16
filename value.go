@@ -359,6 +359,14 @@ func (vlog *valueLog) iterate(lf *logFile, offset uint32, fn logEntry) (uint32, 
 	return validEndOffset, nil
 }
 
+func getGCKey(out *bytes.Buffer, key []byte, ts uint64) []byte {
+	if ts > 0 {
+		return y.KeyWithTsBuffer(out, y.ParseKey(key), ts)
+	}
+
+	return key
+}
+
 func (vlog *valueLog) rewrite(f *logFile, tr trace.Trace) error {
 	maxFid := atomic.LoadUint32(&vlog.maxFid)
 	y.AssertTruef(f.fid < maxFid, "fid to move: %d. Current max fid: %d", f.fid, maxFid)
@@ -369,13 +377,14 @@ func (vlog *valueLog) rewrite(f *logFile, tr trace.Trace) error {
 
 	y.AssertTrue(vlog.db != nil)
 	var count int
+	keyBuf := bytes.NewBuffer(make([]byte, 0, 1<<20))
 	fe := func(e Entry) error {
 		count++
 		if count%100000 == 0 {
 			tr.LazyPrintf("Processing entry %d", count)
 		}
 
-		vs, err := vlog.db.get(e.Key)
+		vs, err := vlog.db.get(getGCKey(keyBuf, e.Key, math.MaxUint64))
 		if err != nil {
 			return err
 		}
@@ -1358,13 +1367,14 @@ func (vlog *valueLog) doRunGC(lf *logFile, discardRatio float64, tr trace.Trace)
 	y.AssertTrue(vlog.db != nil)
 	s := new(y.Slice)
 	var numIterations int
+	keyBuf := bytes.NewBuffer(make([]byte, 0, 1<<20))
 	_, err = vlog.iterate(lf, 0, func(e Entry, vp valuePointer) error {
 		numIterations++
 		esz := vp.Len
 		r.total += esz
 		r.count++
 
-		vs, ierr := vlog.db.get(e.Key)
+		vs, ierr := vlog.db.get(getGCKey(keyBuf, e.Key, math.MaxUint64))
 		if ierr != nil {
 			return ierr
 		}

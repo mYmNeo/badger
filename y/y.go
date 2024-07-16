@@ -119,6 +119,16 @@ func KeyWithTs(key []byte, ts uint64) []byte {
 	return out
 }
 
+func KeyWithTsBuffer(out *bytes.Buffer, key []byte, ts uint64) []byte {
+	var tsBuf [8]byte
+
+	out.Reset()
+	out.Write(key)
+	binary.BigEndian.PutUint64(tsBuf[:], math.MaxUint64-ts)
+	out.Write(tsBuf[:])
+	return out.Bytes()
+}
+
 // ParseTs parses the timestamp from the key bytes.
 func ParseTs(key []byte) uint64 {
 	if len(key) <= 8 {
