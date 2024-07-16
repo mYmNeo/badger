@@ -104,7 +104,7 @@ func (t *Table) DecrRef() error {
 	if err := t.fd.Close(); err != nil {
 		return err
 	}
-	if err := os.Remove(filename); err != nil {
+	if err := os.Remove(filename); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 
