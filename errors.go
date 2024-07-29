@@ -115,4 +115,7 @@ var (
 
 	// ErrDBClosed is returned when a get operation is performed after closing the DB.
 	ErrDBClosed = errors.New("DB Closed")
+
+	// ErrValueFileGone is returned when a value file is missing.
+	ErrValueFileGone = errors.New("Value file is gone")
 )
