@@ -1198,7 +1198,7 @@ func (vlog *valueLog) getFileRLocked(fid uint32) (*logFile, error) {
 	v, ok := vlog.filesMap.Load(fid)
 	if !ok {
 		// log file has gone away, we can't do anything. Return.
-		return nil, errors.Errorf("file with ID: %d not found", fid)
+		return nil, ErrValueFileGone
 	}
 	ret := v.(*logFile)
 	ret.lock.RLock()
