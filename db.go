@@ -331,6 +331,78 @@ func Open(opt Options) (db *DB, err error) {
 	if err = db.vlog.open(db, vptr, db.replayFunction()); err != nil {
 		return db, err
 	}
+
+	// Sometimes we lost some value log. Let's find them and delete them.
+	iitr := table.NewMergeIterator(db.lc.appendIterators(nil, &IteratorOptions{
+		PrefetchSize:   0,
+		PrefetchValues: false,
+		Reverse:        false,
+		AllVersions:    true,
+		InternalAccess: false,
+	}), false)
+
+	if iitr != nil {
+		defer iitr.Close()
+
+		iitr.Rewind()
+		if iitr.Valid() {
+			ts := db.orc.nextTs()
+
+			toLSM := func(nk []byte, vs y.ValueStruct) {
+				for err := db.ensureRoomForWrite(); err != nil; err = db.ensureRoomForWrite() {
+					db.elog.Printf("Replay: Making room for writes")
+					time.Sleep(10 * time.Millisecond)
+				}
+				db.mt.Put(nk, vs)
+			}
+
+			var (
+				rawKey   []byte
+				key      []byte
+				version  uint64
+				examined uint64
+				deleted  uint64
+			)
+			for ; iitr.Valid(); iitr.Next() {
+				examined++
+				vs := iitr.Value()
+
+				// only data not marked as deleted in value log will be examined
+				if vs.Meta&bitValuePointer > 0 && vs.Meta&bitDelete == 0 && len(vs.Value) > 0 {
+					vptr.Decode(vs.Value)
+					if _, found := db.vlog.filesMap.Load(vptr.Fid); !found {
+						rawKey = iitr.Key()
+						key = y.ParseKey(rawKey)
+						version = y.ParseTs(rawKey)
+
+						var maxVs y.ValueStruct
+						_, err := db.lc.get(y.KeyWithTs(key, math.MaxUint64), &maxVs, 0)
+						// if we can't find the latest version of the key in LSM, just deleted it
+						if err == nil {
+							// latest version of key exists, and version is newer than searched key, skip it
+							// if the latest version of key is deleted, there's no need to delete the key in LSM
+							if maxVs.Version > version || maxVs.Meta&bitDelete > 0 {
+								continue
+							}
+						}
+
+						toLSM(y.KeyWithTs(key, ts), y.ValueStruct{
+							Meta: bitDelete,
+						})
+
+						deleted++
+					}
+				}
+			}
+
+			if deleted > 0 {
+				db.orc.incrementNextTs()
+			}
+
+			db.opt.Logger.Infof("Deleted %d of %d keys from LSM that were not in value log", deleted, examined)
+		}
+	}
+
 	replayCloser.SignalAndWait() // Wait for replay to be applied first.
 
 	// Let's advance nextTxnTs to one more than whatever we observed via
