@@ -130,6 +130,23 @@ func (item *Item) ValueCopy(dst []byte) ([]byte, error) {
 	return y.SafeCopy(dst, buf), err
 }
 
+func (item *Item) DeepCopy() *Item {
+	newItem := &Item{
+		vptr:      y.SafeCopy(nil, item.vptr),
+		val:       y.SafeCopy(nil, item.val),
+		key:       y.SafeCopy(nil, item.key),
+		version:   item.version,
+		meta:      item.meta,
+		userMeta:  item.userMeta,
+		expiresAt: item.expiresAt,
+		slice:     new(y.Slice),
+		txn: &Txn{
+			db: item.txn.db,
+		},
+	}
+	return newItem
+}
+
 func (item *Item) hasValue() bool {
 	if item.meta == 0 && item.vptr == nil {
 		// key not found
