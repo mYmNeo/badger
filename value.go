@@ -359,6 +359,29 @@ func (vlog *valueLog) iterate(lf *logFile, offset uint32, fn logEntry) (uint32, 
 	return validEndOffset, nil
 }
 
+func (vlog *valueLog) removeValueLog(f *logFile, _ trace.Trace) error {
+	var deleteFileNow bool
+	// Entries written to LSM. Remove the older file now.
+	if _, ok := vlog.filesMap.Load(f.fid); !ok {
+		return errors.Errorf("Unable to find fid: %d", f.fid)
+	}
+	if vlog.iteratorCount() == 0 {
+		vlog.filesMap.Delete(f.fid)
+		deleteFileNow = true
+	} else {
+		vlog.filesToBeDeleted.Store(f.fid, struct{}{})
+	}
+
+	if deleteFileNow {
+		vlog.opt.Logger.Infof("Removing file %s", f.path)
+		if err := vlog.deleteLogFileWithCleanup(f); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func (vlog *valueLog) rewrite(f *logFile, tr trace.Trace) error {
 	maxFid := atomic.LoadUint32(&vlog.maxFid)
 	y.AssertTruef(f.fid < maxFid, "fid to move: %d. Current max fid: %d", f.fid, maxFid)
@@ -519,29 +542,7 @@ func (vlog *valueLog) rewrite(f *logFile, tr trace.Trace) error {
 	}
 	tr.LazyPrintf("Processed %d entries in %d loops", len(wb), loops)
 	tr.LazyPrintf("Removing fid: %d", f.fid)
-	var deleteFileNow bool
-	// Entries written to LSM. Remove the older file now.
-	{
-		// Just a sanity-check.
-		if _, ok := vlog.filesMap.Load(f.fid); !ok {
-			return errors.Errorf("Unable to find fid: %d", f.fid)
-		}
-		if vlog.iteratorCount() == 0 {
-			vlog.filesMap.Delete(f.fid)
-			deleteFileNow = true
-		} else {
-			vlog.filesToBeDeleted.Store(f.fid, struct{}{})
-		}
-	}
-
-	if deleteFileNow {
-		vlog.opt.Logger.Infof("Removing file %s", f.path)
-		if err := vlog.deleteLogFileWithCleanup(f); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return vlog.removeValueLog(f, tr)
 }
 
 func (vlog *valueLog) incrIteratorCount() {
@@ -1427,7 +1428,12 @@ func (vlog *valueLog) doRunGC(lf *logFile, discardRatio float64, tr trace.Trace)
 		tr.LazyPrintf("Skipping GC on fid: %d", lf.fid)
 		return ErrNoRewrite
 	}
-	if err = vlog.rewrite(lf, tr); err != nil {
+
+	rewriteFunc := vlog.rewrite
+	if r.discard == r.total {
+		rewriteFunc = vlog.removeValueLog
+	}
+	if err = rewriteFunc(lf, tr); err != nil {
 		return err
 	}
 	tr.LazyPrintf("Done rewriting.")
