@@ -72,6 +72,8 @@ type Table struct {
 	bf bbloom.Bloom
 
 	Checksum []byte
+
+	MaxVersion uint64
 }
 
 // IncrRef increments the refcount (having to do with whether the file should be deleted)
@@ -258,6 +260,7 @@ func (t *Table) readIndex() error {
 
 	// Execute this index read serially, because we already have table data in memory.
 	var h header
+	var maxVersion uint64
 	for idx := range t.blockIndex {
 		ko := &t.blockIndex[idx]
 
@@ -267,7 +270,11 @@ func (t *Table) readIndex() error {
 
 		key := t.readNoFail(ko.offset+h.Size(), int(h.klen))
 		ko.key = append([]byte{}, key...)
+		if ver := y.ParseTs(key); ver > maxVersion {
+			maxVersion = ver
+		}
 	}
+	t.MaxVersion = maxVersion
 
 	return nil
 }

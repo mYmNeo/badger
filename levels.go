@@ -894,6 +894,19 @@ func (s *levelsController) fillTablesL0(cd *compactDef) bool {
 	return true
 }
 
+// sortByHeuristic sorts tables in increasing order of MaxVersion, so we
+// compact older tables first.
+func (s *levelsController) sortByHeuristic(tables []*table.Table, cd *compactDef) {
+	if len(tables) == 0 || cd.nextLevel == nil {
+		return
+	}
+
+	// Sort tables by max version. This is what RocksDB does.
+	sort.Slice(tables, func(i, j int) bool {
+		return tables[i].MaxVersion < tables[j].MaxVersion
+	})
+}
+
 // sortByOverlap sorts tables in increasing order of overlap with next level.
 func (s *levelsController) sortByOverlap(tables []*table.Table, cd *compactDef) {
 	if len(tables) == 0 || cd.nextLevel == nil {
@@ -974,10 +987,9 @@ func (s *levelsController) fillTables(cd *compactDef) bool {
 		return s.fillMaxLevelTables(tables, cd)
 	}
 
-	// We want to pick files from current level in order of increasing overlap with next level
-	// tables. Idea here is to first compact file from current level which has least overlap with
-	// next level. This provides us better write amplification.
-	s.sortByOverlap(tables, cd)
+	// We pick tables, so we compact older tables first. This is similar to
+	// kOldestLargestSeqFirst in RocksDB.
+	s.sortByHeuristic(tables, cd)
 
 	for _, t := range tables {
 		cd.thisSize = t.Size()
