@@ -20,8 +20,6 @@ import (
 	"container/heap"
 	"context"
 	"sync/atomic"
-
-	"golang.org/x/net/trace"
 )
 
 type uint64Heap []uint64
@@ -60,33 +58,27 @@ type mark struct {
 // Since doneUntil and lastIndex addresses are passed to sync/atomic packages, we ensure that they
 // are 64-bit aligned by putting them at the beginning of the structure.
 type WaterMark struct {
-	doneUntil uint64
-	lastIndex uint64
+	doneUntil atomic.Uint64
+	lastIndex atomic.Uint64
 	Name      string
 	markCh    chan mark
-	elog      trace.EventLog
 }
 
 // Init initializes a WaterMark struct. MUST be called before using it.
-func (w *WaterMark) Init(closer *Closer, eventLogging bool, markSize int) {
-	w.markCh = make(chan mark, markSize)
-	if eventLogging {
-		w.elog = trace.NewEventLog("Watermark", w.Name)
-	} else {
-		w.elog = NoEventLog
-	}
+func (w *WaterMark) Init(closer *Closer) {
+	w.markCh = make(chan mark, 100)
 	go w.process(closer)
 }
 
 // Begin sets the last index to the given value.
 func (w *WaterMark) Begin(index uint64) {
-	atomic.StoreUint64(&w.lastIndex, index)
+	w.lastIndex.Store(index)
 	w.markCh <- mark{index: index, done: false}
 }
 
 // BeginMany works like Begin but accepts multiple indices.
 func (w *WaterMark) BeginMany(indices []uint64) {
-	atomic.StoreUint64(&w.lastIndex, indices[len(indices)-1])
+	w.lastIndex.Store(indices[len(indices)-1])
 	w.markCh <- mark{index: 0, indices: indices, done: false}
 }
 
@@ -103,18 +95,18 @@ func (w *WaterMark) DoneMany(indices []uint64) {
 // DoneUntil returns the maximum index that has the property that all indices
 // less than or equal to it are done.
 func (w *WaterMark) DoneUntil() uint64 {
-	return atomic.LoadUint64(&w.doneUntil)
+	return w.doneUntil.Load()
 }
 
 // SetDoneUntil sets the maximum index that has the property that all indices
 // less than or equal to it are done.
 func (w *WaterMark) SetDoneUntil(val uint64) {
-	atomic.StoreUint64(&w.doneUntil, val)
+	w.doneUntil.Store(val)
 }
 
 // LastIndex returns the last index for which Begin has been called.
 func (w *WaterMark) LastIndex() uint64 {
-	return atomic.LoadUint64(&w.lastIndex)
+	return w.lastIndex.Load()
 }
 
 // WaitForMark waits until the given index is marked as done.
@@ -150,7 +142,6 @@ func (w *WaterMark) process(closer *Closer) {
 	waiters := make(map[uint64][]chan struct{})
 
 	heap.Init(&indices)
-	var loop uint64
 
 	processOne := func(index uint64, done bool) {
 		// If not already done, then set. Otherwise, don't undo a done entry.
@@ -164,13 +155,6 @@ func (w *WaterMark) process(closer *Closer) {
 			delta = -1
 		}
 		pending[index] = prev + delta
-
-		loop++
-		if len(indices) > 0 && loop%10000 == 0 {
-			min := indices[0]
-			w.elog.Printf("WaterMark %s: Done entry %4d. Size: %4d Watermark: %-4d Looking for: "+
-				"%-4d. Value: %d\n", w.Name, index, len(indices), w.DoneUntil(), min, pending[min])
-		}
 
 		// Update mark by going through all indices in order; and checking if they have
 		// been done. Stop at the first index, which isn't done.
@@ -196,8 +180,7 @@ func (w *WaterMark) process(closer *Closer) {
 		}
 
 		if until != doneUntil {
-			AssertTrue(atomic.CompareAndSwapUint64(&w.doneUntil, doneUntil, until))
-			w.elog.Printf("%s: Done until %d. Loops: %d\n", w.Name, until, loops)
+			AssertTrue(w.doneUntil.CompareAndSwap(doneUntil, until))
 		}
 
 		notifyAndRemove := func(idx uint64, toNotify []chan struct{}) {
@@ -231,7 +214,7 @@ func (w *WaterMark) process(closer *Closer) {
 			return
 		case mark := <-w.markCh:
 			if mark.waiter != nil {
-				doneUntil := atomic.LoadUint64(&w.doneUntil)
+				doneUntil := w.doneUntil.Load()
 				if doneUntil >= mark.index {
 					close(mark.waiter)
 				} else {
