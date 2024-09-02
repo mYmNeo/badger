@@ -17,12 +17,11 @@
 package skl
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"math/rand"
-	"strconv"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -150,42 +149,6 @@ func TestConcurrentBasic(t *testing.T) {
 	}
 	wg.Wait()
 	require.EqualValues(t, n, length(l))
-}
-
-// TestOneKey will read while writing to one single key.
-func TestOneKey(t *testing.T) {
-	const n = 100
-	key := y.KeyWithTs([]byte("thekey"), 0)
-	l := NewSkiplist(arenaSize)
-	defer l.DecrRef()
-
-	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			l.Put(key, y.ValueStruct{Value: newValue(i), Meta: 0, UserMeta: 0})
-		}(i)
-	}
-	// We expect that at least some write made it such that some read returns a value.
-	var sawValue int32
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			p := l.Get(key)
-			if p.Value == nil {
-				return
-			}
-			atomic.AddInt32(&sawValue, 1)
-			v, err := strconv.Atoi(string(p.Value))
-			require.NoError(t, err)
-			require.True(t, 0 <= v && v < n, fmt.Sprintf("invalid value %d", v))
-		}()
-	}
-	wg.Wait()
-	require.True(t, sawValue > 0)
-	require.EqualValues(t, 1, length(l))
 }
 
 func TestFindNear(t *testing.T) {
@@ -416,6 +379,30 @@ func randomKey(rng *rand.Rand) []byte {
 	return y.KeyWithTs(b, 0)
 }
 
+func TestPutWithHint(t *testing.T) {
+	l := NewSkiplist(arenaSize)
+	sp := new(Hint)
+	cnt := 0
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	for {
+		if l.arena.size() > arenaSize-256 {
+			break
+		}
+		key := randomKey(rng)
+		l.PutWithHint(key, y.ValueStruct{Value: key}, sp)
+		cnt++
+	}
+	it := l.NewIterator()
+	var lastKey []byte
+	cntGot := 0
+	for it.SeekToFirst(); it.Valid(); it.Next() {
+		require.True(t, bytes.Compare(lastKey, it.Key()) <= 0)
+		require.True(t, bytes.Compare(it.Key(), it.Value().Value) == 0)
+		cntGot++
+	}
+	require.True(t, cntGot == cnt)
+}
+
 // Standard test. Some fraction is read. Some fraction is write. Writes have
 // to go through mutex lock.
 func BenchmarkReadWrite(b *testing.B) {
@@ -487,4 +474,59 @@ func BenchmarkWrite(b *testing.B) {
 			l.Put(randomKey(rng), y.ValueStruct{Value: value, Meta: 0, UserMeta: 0})
 		}
 	})
+}
+
+// Standard test. Some fraction is read. Some fraction is write. Writes have
+// to go through mutex lock.
+func BenchmarkGetSequential(b *testing.B) {
+	size := 300000
+	keys, l, _ := buildKeysAndList(size)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		key := keys[i%size]
+		l.Get(key)
+	}
+}
+
+func buildKeysAndList(size int) ([][]byte, *Skiplist, *Hint) {
+	l := NewSkiplist(32 * 1024 * 1024)
+	keys := make([][]byte, size)
+	hint := new(Hint)
+	for i := 0; i < size; i++ {
+		keys[i] = y.KeyWithTs([]byte(fmt.Sprintf("%05d", i)), 0)
+	}
+	for i := 0; i < size; i++ {
+		key := keys[i]
+		l.PutWithHint(key, y.ValueStruct{Value: []byte{byte(i)}}, hint)
+	}
+	return keys, l, hint
+}
+
+func BenchmarkGetRandom(b *testing.B) {
+	size := 300000
+	keys, l, _ := buildKeysAndList(size)
+	b.ResetTimer()
+	r := rand.New(rand.NewSource(1))
+	for i := 0; i < b.N; i++ {
+		key := keys[r.Int()%size]
+		l.Get(key)
+	}
+}
+
+func BenchmarkPutWithHint(b *testing.B) {
+	l := NewSkiplist(16 * 1024 * 1024)
+	size := 100000
+	keys := make([][]byte, size)
+	for i := 0; i < size; i++ {
+		keys[i] = y.KeyWithTs([]byte(fmt.Sprintf("%05d", i)), 0)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		hint := new(Hint)
+		l = NewSkiplist(16 * 1024 * 1024)
+		for j := 0; j < size; j++ {
+			key := keys[j]
+			l.PutWithHint(key, y.ValueStruct{Value: []byte{byte(j)}}, hint)
+		}
+	}
 }

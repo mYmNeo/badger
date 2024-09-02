@@ -251,26 +251,21 @@ func (s *Skiplist) findNear(key []byte, less bool, allowEqual bool) (*node, bool
 	}
 }
 
-// findSpliceForLevel returns (outBefore, outAfter) with outBefore.key <= key <= outAfter.key.
+// findSpliceForLevel returns (outBefore, outAfter, match) with outBefore.key < key <= outAfter.key.
 // The input "before" tells us where to start looking.
-// If we found a node with the same key, then we return outBefore = outAfter.
+// If we found a node with the same key, then we return match = true.
 // Otherwise, outBefore.key < key < outAfter.key.
-func (s *Skiplist) findSpliceForLevel(key []byte, before *node, level int) (*node, *node) {
+func (s *Skiplist) findSpliceForLevel(key []byte, before *node, level int) (*node, *node, bool) {
 	for {
 		// Assume before.key < key.
 		next := s.getNext(before, level)
 		if next == nil {
-			return before, next
+			return before, next, false
 		}
 		nextKey := next.key(s.arena)
 		cmp := y.CompareKeys(key, nextKey)
-		if cmp == 0 {
-			// Equality case.
-			return next, next
-		}
-		if cmp < 0 {
-			// before.key < key < next.key. We are done for this level.
-			return before, next
+		if cmp <= 0 {
+			return before, next, cmp == 0
 		}
 		before = next // Keep moving right on this level.
 	}
@@ -282,66 +277,132 @@ func (s *Skiplist) getHeight() int32 {
 
 // Put inserts the key-value pair.
 func (s *Skiplist) Put(key []byte, v y.ValueStruct) {
+	s.PutWithHint(key, v, nil)
+}
+
+// Hint is used to speed up sequential write.
+type Hint struct {
+	height int32
+
+	// hitHeight is used to reduce cost of calculateRecomputeHeight.
+	// For random workload, comparing hint keys from bottom up is wasted work.
+	// So we record the hit height of the last operation, only grow recompute height from near that height.
+	hitHeight int32
+	prev      [maxHeight + 1]*node
+	next      [maxHeight + 1]*node
+}
+
+func (s *Skiplist) calculateRecomputeHeight(key []byte, hint *Hint, listHeight int32) int32 {
+	if hint.height < listHeight {
+		// Either splice is never used or list height has grown, we recompute all.
+		hint.prev[listHeight] = s.head
+		hint.next[listHeight] = nil
+		hint.height = int32(listHeight)
+		hint.hitHeight = hint.height
+		return listHeight
+	}
+	recomputeHeight := hint.hitHeight - 2
+	if recomputeHeight < 0 {
+		recomputeHeight = 0
+	}
+	for recomputeHeight < listHeight {
+		prevNode := hint.prev[recomputeHeight]
+		nextNode := hint.next[recomputeHeight]
+		prevNext := s.getNext(prevNode, int(recomputeHeight))
+		if prevNext != nextNode {
+			recomputeHeight++
+			continue
+		}
+		if prevNode != s.head &&
+			prevNode != nil &&
+			y.CompareKeys(key, prevNode.key(s.arena)) <= 0 {
+			// Key is before splice.
+			for prevNode == hint.prev[recomputeHeight] {
+				recomputeHeight++
+			}
+			continue
+		}
+		if nextNode != nil && y.CompareKeys(key, nextNode.key(s.arena)) > 0 {
+			// Key is after splice.
+			for nextNode == hint.next[recomputeHeight] {
+				recomputeHeight++
+			}
+			continue
+		}
+		break
+	}
+	hint.hitHeight = recomputeHeight
+	return recomputeHeight
+}
+
+// PutWithHint inserts the key-value pair with Hint for better sequential write performance.
+func (s *Skiplist) PutWithHint(key []byte, v y.ValueStruct, hint *Hint) {
 	// Since we allow overwrite, we may not need to create a new node. We might not even need to
 	// increase the height. Let's defer these actions.
-
 	listHeight := s.getHeight()
-	var prev [maxHeight + 1]*node
-	var next [maxHeight + 1]*node
-	prev[listHeight] = s.head
-	next[listHeight] = nil
-	for i := int(listHeight) - 1; i >= 0; i-- {
-		// Use higher level to speed up for current level.
-		prev[i], next[i] = s.findSpliceForLevel(key, prev[i+1], i)
-		if prev[i] == next[i] {
-			prev[i].setValue(s.arena, v)
-			return
-		}
-	}
-
-	// We do need to create a new node.
 	height := s.randomHeight()
-	x := newNode(s.arena, key, v, height)
 
 	// Try to increase s.height via CAS.
 	listHeight = s.getHeight()
 	for height > int(listHeight) {
 		if atomic.CompareAndSwapInt32(&s.height, listHeight, int32(height)) {
 			// Successfully increased skiplist.height.
+			listHeight = int32(height)
 			break
 		}
 		listHeight = s.getHeight()
 	}
+	spliceIsValid := hint != nil
+	if hint == nil {
+		hint = new(Hint)
+	}
+	recomputeHeight := s.calculateRecomputeHeight(key, hint, listHeight)
+	if recomputeHeight > 0 {
+		for i := recomputeHeight - 1; i >= 0; i-- {
+			var match bool
+			hint.prev[i], hint.next[i], match = s.findSpliceForLevel(key, hint.prev[i+1], int(i))
+			if match {
+				// In place update.
+				hint.next[i].setValue(s.arena, v)
+				for i > 0 {
+					hint.prev[i-1] = hint.prev[i]
+					hint.next[i-1] = hint.next[i]
+					i--
+				}
+				return
+			}
+		}
+	}
+
+	// We do need to create a new node.
+	x := newNode(s.arena, key, v, height)
 
 	// We always insert from the base level and up. After you add a node in base level, we cannot
 	// create a node in the level above because it would have discovered the node in the base level.
 	for i := 0; i < height; i++ {
 		for {
-			if prev[i] == nil {
-				y.AssertTrue(i > 1) // This cannot happen in base level.
-				// We haven't computed prev, next for this level because height exceeds old listHeight.
-				// For these levels, we expect the lists to be sparse, so we can just search from head.
-				prev[i], next[i] = s.findSpliceForLevel(key, s.head, i)
-				// Someone adds the exact same key before we are able to do so. This can only happen on
-				// the base level. But we know we are not on the base level.
-				y.AssertTrue(prev[i] != next[i])
-			}
-			nextOffset := s.arena.getNodeOffset(next[i])
+			nextOffset := s.arena.getNodeOffset(hint.next[i])
 			x.tower[i] = nextOffset
-			if prev[i].casNextOffset(i, nextOffset, s.arena.getNodeOffset(x)) {
+			if hint.prev[i].casNextOffset(i, nextOffset, s.arena.getNodeOffset(x)) {
 				// Managed to insert x between prev[i] and next[i]. Go to the next level.
 				break
 			}
 			// CAS failed. We need to recompute prev and next.
 			// It is unlikely to be helpful to try to use a different level as we redo the search,
 			// because it is unlikely that lots of nodes are inserted between prev[i] and next[i].
-			prev[i], next[i] = s.findSpliceForLevel(key, prev[i], i)
-			if prev[i] == next[i] {
-				y.AssertTruef(i == 0, "Equality can happen only on base level: %d", i)
-				prev[i].setValue(s.arena, v)
-				return
+			hint.prev[i], hint.next[i], _ = s.findSpliceForLevel(key, hint.prev[i], i)
+			if i > 0 {
+				spliceIsValid = false
 			}
 		}
+	}
+	if spliceIsValid {
+		for i := 0; i < height; i++ {
+			hint.prev[i] = x
+			hint.next[i] = s.getNext(x, i)
+		}
+	} else {
+		hint.height = 0
 	}
 }
 
