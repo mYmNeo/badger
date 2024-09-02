@@ -599,7 +599,10 @@ nextTable:
 
 	it.Rewind()
 
-	filter := s.kv.opt.CompactionFilter
+	var filter CompactionFilter
+	if s.kv.opt.CompactionFilterFactory != nil {
+		filter = s.kv.opt.CompactionFilterFactory()
+	}
 
 	// Pick a discard ts, so we can discard versions below this ts. We should
 	// never discard any versions starting from above this timestamp, because
@@ -687,9 +690,14 @@ nextTable:
 				}
 			}
 			if filter != nil {
-				skip := filter(it.Key(), vs.Value, []byte{vs.UserMeta})
-				if skip {
+				switch filter.Filter(it.Key(), vs.Value, vs.UserMeta) {
+				case DecisionDelete:
+					// Convert to delete tombstone.
+					builder.Add(it.Key(), y.ValueStruct{Meta: bitDelete})
 					continue
+				case DecisionDrop:
+					continue
+				case DecisionKeep:
 				}
 			}
 			numKeys++

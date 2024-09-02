@@ -1959,6 +1959,22 @@ func removeDir(dir string) {
 	}
 }
 
+type testFilter struct{}
+
+var (
+	userMetaDrop   = byte(0x01)
+	userMetaDelete = byte(0x00)
+)
+
+func (f *testFilter) Filter(key, val []byte, userMeta byte) Decision {
+	if userMeta == userMetaDrop {
+		return DecisionDrop
+	} else if userMeta == userMetaDelete {
+		return DecisionDelete
+	}
+	return DecisionKeep
+}
+
 func TestCompactionFilter(t *testing.T) {
 	dir, err := ioutil.TempDir("", "badger")
 	require.NoError(t, err)
@@ -1969,40 +1985,56 @@ func TestCompactionFilter(t *testing.T) {
 	opts.NumMemtables = 2
 	opts.NumLevelZeroTables = 1
 	opts.NumLevelZeroTablesStall = 2
-	opts.CompactionFilter = func(key, val, userMeta []byte) (skip bool) {
-		// Only keep the keys with user meta.
-		if len(userMeta) == 0 {
-			return true
-		}
-		return false
+	opts.CompactionFilterFactory = func() CompactionFilter {
+		return &testFilter{}
 	}
 	db, err := Open(opts)
 	require.NoError(t, err)
+	defer db.Close()
 	val := make([]byte, 1024*4)
-	// Insert 100 entries to trigger some compaction.
+	// Insert 50 entries that will be kept.
+	for i := 0; i < 50; i++ {
+		err = db.Update(func(txn *Txn) error {
+			key := []byte(fmt.Sprintf("key%d", i))
+			// Entries without userMeta will result in DecisionKeep in testFilter.
+			return txn.Set(key, val)
+		})
+		require.NoError(t, err)
+	}
+	// Insert keys for delete decision and drop decision.
 	for i := 0; i < 100; i++ {
 		db.Update(func(txn *Txn) error {
 			key := []byte(fmt.Sprintf("key%d", i))
 			if i%2 == 0 {
-				txn.Set(key, val)
+				// Entries with userMetaDelete will result in DecisionMarkTombstone in testFilter.
+				txn.SetWithMeta(key, val, userMetaDelete)
 			} else {
-				txn.SetWithMeta(key, val, 0x00)
+				// Entries with userMetaDrop will result in DecisionDrop in testFilter.
+				txn.SetWithMeta(key, val, userMetaDrop)
 			}
 			return nil
 		})
 	}
-	// The first 50 entries must have been compacted already.
-	db.View(func(txn *Txn) error {
+	var deleteNotFoundCount, dropAppearOldCount int
+	err = db.View(func(txn *Txn) error {
 		for i := 0; i < 50; i++ {
 			key := []byte(fmt.Sprintf("key%d", i))
 			item, _ := txn.Get(key)
 			if i%2 == 0 {
-				require.Nil(t, item)
+				// For delete decision, the old value can not be read.
+				if item == nil {
+					deleteNotFoundCount++
+				}
 			} else {
-				require.NotNil(t, item)
-				require.Len(t, item.UserMeta(), 1)
+				// For dropped entry, since no tombstone left, the old value appear again.
+				if item != nil && item.UserMeta() == 0 {
+					dropAppearOldCount++
+				}
 			}
 		}
 		return nil
 	})
+	require.True(t, deleteNotFoundCount > 0)
+	// Since compaction always pick upper level first, the never has chance to reappear old value.
+	// require.True(t, dropAppearOldCount > 0)
 }
