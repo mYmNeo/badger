@@ -599,6 +599,8 @@ nextTable:
 
 	it.Rewind()
 
+	filter := s.kv.opt.CompactionFilter
+
 	// Pick a discard ts, so we can discard versions below this ts. We should
 	// never discard any versions starting from above this timestamp, because
 	// that would affect the snapshot view guarantee provided by transactions.
@@ -682,6 +684,12 @@ nextTable:
 						numSkips++
 						continue // Skip adding this key.
 					}
+				}
+			}
+			if filter != nil {
+				skip := filter(it.Key(), vs.Value, []byte{vs.UserMeta})
+				if skip {
+					continue
 				}
 			}
 			numKeys++

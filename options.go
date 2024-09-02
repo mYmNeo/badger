@@ -81,6 +81,11 @@ type Options struct {
 	// NumMaxGCFile defines the maximum number of garbage collection files
 	NumMaxGCFile int
 
+	// The compaction process invokes this method for kv that is being compacted. A return value of false
+	// indicates that the kv should be preserved in the output of this compaction run and a return value
+	// of true indicates that this key-value should be removed from the output of the compaction.
+	CompactionFilter func(key, val, userMeta []byte) (skip bool)
+
 	// Transaction start and commit timestamps are managed by end-user.
 	// This is only useful for databases built on top of Badger (like Dgraph).
 	// Not recommended for most users.

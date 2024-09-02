@@ -386,6 +386,15 @@ func (txn *Txn) SetEntry(e *Entry) error {
 	return txn.modify(e)
 }
 
+// SetWithMeta adds a key-value pair to the database, along with a metadata
+// byte. This byte is stored alongside the key, and can be used as an aid to
+// interpret the value or store other contextual bits corresponding to the
+// key-value pair.
+func (txn *Txn) SetWithMeta(key, val []byte, meta byte) error {
+	e := &Entry{Key: y.KeyWithTs(key, 0), Value: val, UserMeta: meta}
+	return txn.SetEntry(e)
+}
+
 // Delete deletes a key.
 //
 // This is done by adding a delete marker for the key at commit timestamp.  Any
