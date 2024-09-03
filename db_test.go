@@ -1966,7 +1966,7 @@ var (
 	userMetaDelete = byte(0x00)
 )
 
-func (f *testFilter) Filter(key, val []byte, userMeta byte) Decision {
+func (f *testFilter) Filter(key, val []byte, userMeta byte, level int) Decision {
 	if userMeta == userMetaDrop {
 		return DecisionDrop
 	} else if userMeta == userMetaDelete {

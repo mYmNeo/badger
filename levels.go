@@ -690,7 +690,7 @@ nextTable:
 				}
 			}
 			if filter != nil {
-				switch filter.Filter(it.Key(), vs.Value, vs.UserMeta) {
+				switch filter.Filter(it.Key(), vs.Value, vs.UserMeta, lev) {
 				case DecisionDelete:
 					// Convert to delete tombstone.
 					builder.Add(it.Key(), y.ValueStruct{Meta: bitDelete})
