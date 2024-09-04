@@ -1249,6 +1249,11 @@ func (db *DB) Tables(withKeysCount bool) []TableInfo {
 	return db.lc.getTableInfo(withKeysCount)
 }
 
+// Levels gets the LevelInfo.
+func (db *DB) Levels() []LevelInfo {
+	return db.lc.getLevelInfo()
+}
+
 // KeySplits can be used to get rough key ranges to divide up iteration over
 // the DB.
 func (db *DB) KeySplits(prefix []byte) []string {

@@ -720,13 +720,13 @@ nextTable:
 			defer inflightBuilders.Done(err)
 
 			build := func(fileID uint64) (*table.Table, error) {
-				fd, err := y.CreateSyncedFile(table.NewFilename(fid, s.kv.opt.Dir), true)
+				fd, err := y.CreateSyncedFile(table.NewFilename(fileID, s.kv.opt.Dir), true)
 				if err != nil {
-					return nil, errors.Wrapf(err, "While opening new table: %d", fid)
+					return nil, errors.Wrapf(err, "While opening new table: %d", fileID)
 				}
 
 				if _, err := fd.Write(builder.Finish()); err != nil {
-					return nil, errors.Wrapf(err, "Unable to write to file: %d", fid)
+					return nil, errors.Wrapf(err, "Unable to write to file: %d", fileID)
 				}
 				newTbl, err := table.OpenTable(fd, s.kv.opt.TableLoadingMode, nil)
 				// decrRef is added below.
@@ -1238,4 +1238,24 @@ func (s *levelsController) getTableInfo(withKeysCount bool) (result []TableInfo)
 		return result[i].ID < result[j].ID
 	})
 	return
+}
+
+type LevelInfo struct {
+	Level     int
+	NumTables int
+	Size      int64
+	MaxSize   int64
+}
+
+func (s *levelsController) getLevelInfo() []LevelInfo {
+	result := make([]LevelInfo, len(s.levels))
+	for i, l := range s.levels {
+		l.RLock()
+		result[i].Level = i
+		result[i].Size = l.totalSize
+		result[i].NumTables = len(l.tables)
+		result[i].MaxSize = l.maxTotalSize
+		l.RUnlock()
+	}
+	return result
 }
