@@ -28,8 +28,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/net/trace"
-
 	"github.com/pkg/errors"
 
 	"github.com/dgraph-io/badger/pb"
@@ -39,8 +37,6 @@ import (
 
 type levelsController struct {
 	nextFileID uint64 // Atomic
-	elog       trace.EventLog
-
 	// The following are initialized once and const.
 	levels []*levelHandler
 	kv     *DB
@@ -67,7 +63,6 @@ func revertToManifest(kv *DB, mf *Manifest, idMap map[uint64]struct{}) error {
 	// 2. Delete files that shouldn't exist.
 	for id := range idMap {
 		if _, ok := mf.Tables[id]; !ok {
-			kv.elog.Printf("Table file %d not referenced in MANIFEST\n", id)
 			filename := table.NewFilename(id, kv.opt.Dir)
 			if err := os.Remove(filename); err != nil {
 				return y.Wrapf(err, "While removing table %d", id)
@@ -82,7 +77,6 @@ func newLevelsController(db *DB, mf *Manifest) (*levelsController, error) {
 	y.AssertTrue(db.opt.NumLevelZeroTablesStall > db.opt.NumLevelZeroTables)
 	s := &levelsController{
 		kv:     db,
-		elog:   db.elog,
 		levels: make([]*levelHandler, db.opt.MaxLevels),
 	}
 	s.cstatus.levels = make([]*levelCompactStatus, db.opt.MaxLevels)
@@ -328,7 +322,6 @@ func (s *levelsController) dropPrefixes(prefixes [][]byte) error {
 		opt.Infof("Dropping prefix at level %d (%d tableGroups)", l.level, len(tableGroups))
 		for _, operation := range tableGroups {
 			cd := compactDef{
-				elog:         trace.New(fmt.Sprintf("Badger.L%d", l.level), "Compact"),
 				thisLevel:    l,
 				nextLevel:    l,
 				top:          nil,
@@ -844,8 +837,6 @@ func containsAnyPrefixes(table *table.Table, listOfPrefixes [][]byte) bool {
 }
 
 type compactDef struct {
-	elog trace.Trace
-
 	thisLevel *levelHandler
 	nextLevel *levelHandler
 
@@ -1080,12 +1071,9 @@ func (s *levelsController) doCompact(id int, p compactionPriority) error {
 	y.AssertTrue(l < s.kv.opt.MaxLevels) // Sanity check.
 
 	cd := compactDef{
-		elog:         trace.New(fmt.Sprintf("Badger.L%d", l), "Compact"),
 		thisLevel:    s.levels[l],
 		dropPrefixes: p.dropPrefixes,
 	}
-	cd.elog.SetMaxEvents(100)
-	defer cd.elog.Finish()
 
 	s.kv.opt.Debugf("[Compactor: %d] Attempting to run compaction: %+v", id, p)
 
@@ -1110,14 +1098,12 @@ func (s *levelsController) doCompact(id int, p compactionPriority) error {
 
 	s.kv.opt.Infof("[Compactor: %d] Running compaction: %+v for level: %d\n",
 		id, p, cd.thisLevel.level)
-	s.cstatus.toLog(cd.elog)
 	if err := s.runCompactDef(l, cd); err != nil {
 		// This compaction couldn't be done successfully.
 		s.kv.opt.Warningf("[Compactor: %d] LOG Compact FAILED with error: %+v: %+v", id, err, cd)
 		return err
 	}
 
-	s.cstatus.toLog(cd.elog)
 	s.kv.opt.Infof("[Compactor: %d] Compaction for level: %d DONE", id, cd.thisLevel.level)
 	return nil
 }
@@ -1136,39 +1122,20 @@ func (s *levelsController) addLevel0Table(t *table.Table) error {
 
 	for !s.levels[0].tryAddLevel0Table(t) {
 		// Stall. Make sure all levels are healthy before we unstall.
-		var timeStart time.Time
-		{
-			s.kv.opt.Infof("STALLED STALLED STALLED: %v\n", time.Since(lastUnstalled))
-			s.cstatus.RLock()
-			for i := 0; i < s.kv.opt.MaxLevels; i++ {
-				s.elog.Printf("level=%d. Status=%s Size=%d\n",
-					i, s.cstatus.levels[i].debug(), s.levels[i].getTotalSize())
-			}
-			s.cstatus.RUnlock()
-			timeStart = time.Now()
-		}
+		s.kv.opt.Infof("STALLED STALLED STALLED: %v\n", time.Since(lastUnstalled))
+		s.cstatus.RLock()
+		s.cstatus.RUnlock()
 		// Before we unstall, we need to make sure that level 0 and 1 are healthy. Otherwise, we
 		// will very quickly fill up level 0 again and if the compaction strategy favors level 0,
 		// then level 1 is going to super full.
-		for i := 0; ; i++ {
-			// Passing 0 for delSize to compactable means we're treating incomplete compactions as
-			// not having finished -- we wait for them to finish.  Also, it's crucial this behavior
-			// replicates pickCompactLevels' behavior in computing compactability in order to
-			// guarantee progress.
-			if !s.isLevel0Compactable() && !s.levels[1].isCompactable(0) {
-				break
-			}
+		// Passing 0 for delSize to compactable means we're treating incomplete compactions as
+		// not having finished -- we wait for them to finish.  Also, it's crucial this behavior
+		// replicates pickCompactLevels' behavior in computing compactability in order to
+		// guarantee progress.
+		for s.isLevel0Compactable() || s.levels[1].isCompactable(0) {
 			time.Sleep(10 * time.Millisecond)
-			if i%100 == 0 {
-				prios := s.pickCompactLevels(nil)
-				s.elog.Printf("Waiting to add level 0 table. Compaction priorities: %+v\n", prios)
-				i = 0
-			}
 		}
-		{
-			s.elog.Printf("UNSTALLED UNSTALLED UNSTALLED: %v\n", time.Since(timeStart))
-			lastUnstalled = time.Now()
-		}
+		lastUnstalled = time.Now()
 	}
 
 	return nil

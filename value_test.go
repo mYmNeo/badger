@@ -28,7 +28,6 @@ import (
 
 	"github.com/dustin/go-humanize"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/net/trace"
 
 	"github.com/dgraph-io/badger/options"
 	"github.com/dgraph-io/badger/y"
@@ -186,9 +185,7 @@ func TestValueGC(t *testing.T) {
 	//		return true
 	//	})
 
-	tr := trace.New("Test", "Test")
-	defer tr.Finish()
-	kv.vlog.rewrite(lf, tr)
+	kv.vlog.rewrite(lf)
 	for i := 45; i < 100; i++ {
 		key := []byte(fmt.Sprintf("key%d", i))
 
@@ -244,9 +241,7 @@ func TestValueGC2(t *testing.T) {
 	//		return true
 	//	})
 
-	tr := trace.New("Test", "Test")
-	defer tr.Finish()
-	kv.vlog.rewrite(lf, tr)
+	kv.vlog.rewrite(lf)
 	for i := 0; i < 5; i++ {
 		key := []byte(fmt.Sprintf("key%d", i))
 		require.NoError(t, kv.View(func(txn *Txn) error {
@@ -341,9 +336,7 @@ func TestValueGC3(t *testing.T) {
 	require.True(t, ok)
 	logFile := v.(*logFile)
 
-	tr := trace.New("Test", "Test")
-	defer tr.Finish()
-	kv.vlog.rewrite(logFile, tr)
+	kv.vlog.rewrite(logFile)
 	it.Next()
 	require.True(t, it.Valid())
 	item = it.Item()
@@ -399,10 +392,8 @@ func TestValueGC4(t *testing.T) {
 	//		return true
 	//	})
 
-	tr := trace.New("Test", "Test")
-	defer tr.Finish()
-	kv.vlog.rewrite(lf0, tr)
-	kv.vlog.rewrite(lf1, tr)
+	kv.vlog.rewrite(lf0)
+	kv.vlog.rewrite(lf1)
 
 	require.NoError(t, kv.Close())
 
@@ -467,9 +458,7 @@ func TestValueGC5(t *testing.T) {
 	require.True(t, ok)
 	lf := v.(*logFile)
 
-	tr := trace.New("Test", "Test")
-	defer tr.Finish()
-	require.NoError(t, kv.vlog.doRunGC(lf, 0.9, tr))
+	require.NoError(t, kv.vlog.doRunGC(lf, 0.9))
 
 	for i := 0; i < 45; i++ {
 		key := []byte(fmt.Sprintf("key%d", i))

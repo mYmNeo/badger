@@ -33,7 +33,6 @@ import (
 
 	"github.com/dustin/go-humanize"
 	"github.com/pkg/errors"
-	"golang.org/x/net/trace"
 
 	"github.com/dgraph-io/badger/options"
 	"github.com/dgraph-io/badger/pb"
@@ -68,7 +67,6 @@ type DB struct {
 	valueDirGuard *directoryLockGuard
 
 	closers   closers
-	elog      trace.EventLog
 	mt        *skl.Skiplist   // Our latest (actively written) in-memory table
 	imm       []*skl.Skiplist // Add here only AFTER pushing to flushChan.
 	opt       Options
@@ -104,18 +102,12 @@ func (db *DB) replayFunction() func(Entry, valuePointer) error {
 
 	toLSM := func(nk []byte, vs y.ValueStruct) {
 		for err := db.ensureRoomForWrite(); err != nil; err = db.ensureRoomForWrite() {
-			db.elog.Printf("Replay: Making room for writes")
 			time.Sleep(10 * time.Millisecond)
 		}
 		db.mt.Put(nk, vs)
 	}
 
-	first := true
 	return func(e Entry, vp valuePointer) error { // Function for replaying.
-		if first {
-			db.elog.Printf("First key=%q\n", e.Key)
-		}
-		first = false
 		db.orc.Lock()
 		if db.orc.nextTxnTs < y.ParseTs(e.Key) {
 			db.orc.nextTxnTs = y.ParseTs(e.Key)
@@ -271,18 +263,12 @@ func Open(opt Options) (db *DB, err error) {
 		}
 	}()
 
-	elog := y.NoEventLog
-	if opt.EventLogging {
-		elog = trace.NewEventLog("Badger", "DB")
-	}
-
 	db = &DB{
 		imm:           make([]*skl.Skiplist, 0, opt.NumMemtables),
 		flushChan:     make(chan flushTask, opt.NumMemtables),
 		writeCh:       make(chan *request, opt.KVWriteCapacity),
 		opt:           opt,
 		manifest:      manifestFile,
-		elog:          elog,
 		dirLockGuard:  dirLockGuard,
 		valueDirGuard: valueDirLockGuard,
 		orc:           newOracle(opt),
@@ -350,7 +336,6 @@ func Open(opt Options) (db *DB, err error) {
 
 			toLSM := func(nk []byte, vs y.ValueStruct) {
 				for err := db.ensureRoomForWrite(); err != nil; err = db.ensureRoomForWrite() {
-					db.elog.Printf("Replay: Making room for writes")
 					time.Sleep(10 * time.Millisecond)
 				}
 				db.mt.Put(nk, vs)
@@ -446,8 +431,6 @@ func (db *DB) IsClosed() bool {
 }
 
 func (db *DB) close() (err error) {
-	db.elog.Printf("Closing database")
-
 	atomic.StoreInt32(&db.blockWrites, 1)
 
 	// Stop value GC first.
@@ -467,7 +450,6 @@ func (db *DB) close() (err error) {
 	// trying to push stuff into the memtable. This will also resolve the value
 	// offset problem: as we push into memtable, we update value offsets there.
 	if !db.mt.Empty() {
-		db.elog.Printf("Flushing memtable")
 		for {
 			pushedFlushTask := func() bool {
 				db.lock.Lock()
@@ -477,7 +459,6 @@ func (db *DB) close() (err error) {
 				case db.flushChan <- flushTask{mt: db.mt, vptr: db.vhead}:
 					db.imm = append(db.imm, db.mt) // Flusher will attempt to remove this from s.imm.
 					db.mt = nil                    // Will segfault if we try writing!
-					db.elog.Printf("pushed to flush chan\n")
 					return true
 				default:
 					// If we fail to push, we need to unlock and wait for a short while.
@@ -518,11 +499,8 @@ func (db *DB) close() (err error) {
 	if lcErr := db.lc.close(); err == nil {
 		err = errors.Wrap(lcErr, "DB.Close")
 	}
-	db.elog.Printf("Waiting for closer")
 	db.closers.updateSize.SignalAndWait()
 	db.orc.Stop()
-
-	db.elog.Finish()
 
 	atomic.StoreUint32(&db.isClosed, 1)
 
@@ -704,7 +682,6 @@ func (db *DB) writeRequests(reqs []*request) error {
 			r.Wg.Done()
 		}
 	}
-	db.elog.Printf("writeRequests called. Writing to value log")
 
 	err := db.vlog.write(reqs)
 	if err != nil {
@@ -712,21 +689,12 @@ func (db *DB) writeRequests(reqs []*request) error {
 		return err
 	}
 
-	db.elog.Printf("Sending updates to subscribers")
 	db.pub.sendUpdates(reqs)
-	db.elog.Printf("Writing to memtable")
-	var count int
 	for _, b := range reqs {
 		if len(b.Entries) == 0 {
 			continue
 		}
-		count += len(b.Entries)
-		var i uint64
 		for err = db.ensureRoomForWrite(); err == errNoRoom; err = db.ensureRoomForWrite() {
-			i++
-			if i%100 == 0 {
-				db.elog.Printf("Making room for writes")
-			}
 			// We need to poll a bit because both hasRoomForWrite and the flusher need access to s.imm.
 			// When flushChan is full and you are blocked there, and the flusher is trying to update s.imm,
 			// you will get a deadlock.
@@ -745,7 +713,6 @@ func (db *DB) writeRequests(reqs []*request) error {
 		db.lock.Unlock()
 	}
 	done(nil)
-	db.elog.Printf("%d entries written", count)
 	return nil
 }
 
@@ -983,24 +950,16 @@ func (db *DB) handleFlushTask(ft flushTask) error {
 	}
 
 	// Don't block just to sync the directory entry.
-	dirSyncCh := make(chan error)
-	go func() { dirSyncCh <- syncDir(db.opt.Dir) }()
+	go syncDir(db.opt.Dir)
 
 	err = db.writeLevel0Table(ft, fd)
-	dirSyncErr := <-dirSyncCh
 
 	if err != nil {
-		db.elog.Errorf("ERROR while writing to level 0: %v", err)
 		return err
-	}
-	if dirSyncErr != nil {
-		// Do dir sync as best effort. No need to return due to an error there.
-		db.elog.Errorf("ERROR while syncing level directory: %v", dirSyncErr)
 	}
 
 	tbl, err := table.OpenTable(fd, db.opt.TableLoadingMode, nil)
 	if err != nil {
-		db.elog.Printf("ERROR while opening table: %v", err)
 		return err
 	}
 	// We own a ref on tbl.
@@ -1066,7 +1025,7 @@ func (db *DB) calculateSize() {
 
 	totalSize := func(dir string) (int64, int64) {
 		var lsmSize, vlogSize int64
-		err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
 				return err
 			}
@@ -1078,9 +1037,6 @@ func (db *DB) calculateSize() {
 			}
 			return nil
 		})
-		if err != nil {
-			db.elog.Printf("Got error while calculating total size of directory: %s", dir)
-		}
 		return lsmSize, vlogSize
 	}
 

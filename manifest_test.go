@@ -27,8 +27,6 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/net/trace"
-
 	"github.com/stretchr/testify/require"
 
 	"github.com/dgraph-io/badger/options"
@@ -179,7 +177,6 @@ func TestOverlappingKeyRangeError(t *testing.T) {
 	cd := compactDef{
 		thisLevel: lh0,
 		nextLevel: lh1,
-		elog:      trace.New("Badger", "Compact"),
 	}
 
 	manifest := createManifest()
@@ -199,7 +196,6 @@ func TestOverlappingKeyRangeError(t *testing.T) {
 	cd = compactDef{
 		thisLevel: lh0,
 		nextLevel: lh1,
-		elog:      trace.New("Badger", "Compact"),
 	}
 	lc.fillTablesL0(&cd)
 	lc.runCompactDef(0, cd)

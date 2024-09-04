@@ -35,7 +35,6 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
-	"golang.org/x/net/trace"
 	"golang.org/x/sys/unix"
 
 	"github.com/dgraph-io/badger/options"
@@ -359,7 +358,7 @@ func (vlog *valueLog) iterate(lf *logFile, offset uint32, fn logEntry) (uint32, 
 	return validEndOffset, nil
 }
 
-func (vlog *valueLog) removeValueLog(f *logFile, _ trace.Trace) error {
+func (vlog *valueLog) removeValueLog(f *logFile) error {
 	var deleteFileNow bool
 	// Entries written to LSM. Remove the older file now.
 	if _, ok := vlog.filesMap.Load(f.fid); !ok {
@@ -382,22 +381,15 @@ func (vlog *valueLog) removeValueLog(f *logFile, _ trace.Trace) error {
 	return nil
 }
 
-func (vlog *valueLog) rewrite(f *logFile, tr trace.Trace) error {
+func (vlog *valueLog) rewrite(f *logFile) error {
 	maxFid := atomic.LoadUint32(&vlog.maxFid)
 	y.AssertTruef(f.fid < maxFid, "fid to move: %d. Current max fid: %d", f.fid, maxFid)
-	tr.LazyPrintf("Rewriting fid: %d", f.fid)
 
 	wb := make([]*Entry, 0, 1000)
 	var size int64
 
 	y.AssertTrue(vlog.db != nil)
-	var count int
 	fe := func(e Entry) error {
-		count++
-		if count%100000 == 0 {
-			tr.LazyPrintf("Processing entry %d", count)
-		}
-
 		vs, err := vlog.db.get(e.Key)
 		if err != nil {
 			return err
@@ -445,7 +437,6 @@ func (vlog *valueLog) rewrite(f *logFile, tr trace.Trace) error {
 			// Ensure length and size of wb is within transaction limits.
 			if int64(len(wb)+1) >= vlog.opt.maxBatchCount ||
 				size+es >= vlog.opt.maxBatchSize {
-				tr.LazyPrintf("request has %d entries, size %d", len(wb), size)
 				if err := vlog.db.batchSet(wb); err != nil {
 					return err
 				}
@@ -516,7 +507,6 @@ func (vlog *valueLog) rewrite(f *logFile, tr trace.Trace) error {
 		return err
 	}
 
-	tr.LazyPrintf("request has %d entries, size %d", len(wb), size)
 	batchSize := 1024
 	var loops int
 	for i := 0; i < len(wb); {
@@ -533,16 +523,13 @@ func (vlog *valueLog) rewrite(f *logFile, tr trace.Trace) error {
 			if err == ErrTxnTooBig {
 				// Decrease the batch size to half.
 				batchSize = batchSize / 2
-				tr.LazyPrintf("Dropped batch size to %d", batchSize)
 				continue
 			}
 			return err
 		}
 		i += batchSize
 	}
-	tr.LazyPrintf("Processed %d entries in %d loops", len(wb), loops)
-	tr.LazyPrintf("Removing fid: %d", f.fid)
-	return vlog.removeValueLog(f, tr)
+	return vlog.removeValueLog(f)
 }
 
 func (vlog *valueLog) incrIteratorCount() {
@@ -649,7 +636,6 @@ type valueLog struct {
 	valueBufferPool sync.Pool
 
 	dirPath string
-	elog    trace.EventLog
 
 	// guards our view of which files exist, which to be deleted, how many active iterators
 	filesMap         sync.Map
@@ -799,10 +785,6 @@ func (vlog *valueLog) init(db *DB) {
 	vlog.opt = db.opt
 	vlog.db = db
 	vlog.dirPath = vlog.opt.ValueDir
-	vlog.elog = y.NoEventLog
-	if db.opt.EventLogging {
-		vlog.elog = trace.NewEventLog("Badger", "Valuelog")
-	}
 	vlog.garbageCh = make(chan struct{}, 1) // Only allow one GC at a time.
 	vlog.poolOnce.Do(func() {
 		vlog.valueBufferPool = sync.Pool{
@@ -938,10 +920,6 @@ func (lf *logFile) open(path string, flags uint32) error {
 }
 
 func (vlog *valueLog) Close() error {
-	vlog.elog.Printf("Stopping garbage collection of values.")
-	defer vlog.elog.Finish()
-
-	vlog.elog.Printf("Delete vlog files to be deleted.")
 	vlog.filesToBeDeleted.Range(func(k, v interface{}) bool {
 		f := v.(*logFile)
 		vlog.deleteLogFileWithCleanup(f)
@@ -1110,7 +1088,6 @@ func (vlog *valueLog) write(reqs []*request) error {
 		if buf.Len() == 0 {
 			return nil
 		}
-		vlog.elog.Printf("Flushing buffer of size %d to vlog", buf.Len())
 		n, err := curlf.fd.Write(buf.Bytes())
 		if err != nil {
 			return errors.Wrapf(err, "Unable to write to value log file: %q", curlf.path)
@@ -1118,7 +1095,6 @@ func (vlog *valueLog) write(reqs []*request) error {
 		buf.Reset()
 		y.NumWrites.Add(1)
 		y.NumBytesWritten.Add(int64(n))
-		vlog.elog.Printf("Done")
 		atomic.AddUint32(&vlog.writableLogOffset, uint32(n))
 		atomic.StoreUint32(&curlf.size, vlog.writableLogOffset)
 		return nil
@@ -1299,13 +1275,11 @@ func valueBytesToEntryForTest(decoder Decoder, buf []byte) (e Entry) {
 	return
 }
 
-func (vlog *valueLog) pickLog(head valuePointer, tr trace.Trace) (files []*logFile) {
+func (vlog *valueLog) pickLog(head valuePointer) (files []*logFile) {
 	fids := vlog.sortedFids()
 	if len(fids) <= 1 {
-		tr.LazyPrintf("Only one or less value log file.")
 		return nil
 	} else if head.Fid == 0 {
-		tr.LazyPrintf("Head pointer is at zero.")
 		return nil
 	}
 
@@ -1348,7 +1322,7 @@ func discardEntry(e Entry, vs y.ValueStruct, db *DB) bool {
 	return false
 }
 
-func (vlog *valueLog) doRunGC(lf *logFile, discardRatio float64, tr trace.Trace) (err error) {
+func (vlog *valueLog) doRunGC(lf *logFile, discardRatio float64) (err error) {
 	type reason struct {
 		total   uint32
 		discard uint32
@@ -1393,8 +1367,6 @@ func (vlog *valueLog) doRunGC(lf *logFile, discardRatio float64, tr trace.Trace)
 			// This is still the active entry. This would need to be rewritten.
 
 		} else {
-			vlog.elog.Printf("Reason=%+v\n", r)
-
 			buf, cb, rerr := vlog.readValueBytes(vp, s)
 			if rerr != nil {
 				return errStop
@@ -1414,18 +1386,12 @@ func (vlog *valueLog) doRunGC(lf *logFile, discardRatio float64, tr trace.Trace)
 	})
 
 	if err != nil {
-		tr.LazyPrintf("Error while iterating for RunGC: %v", err)
-		tr.SetError()
 		return err
 	}
-	tr.LazyPrintf("Fid: %d. Num iterations: %d. Data status=%+v\n",
-		lf.fid, numIterations, r)
-
 	vlog.opt.Logger.Infof("%s total: %d, discard: %d, ratio: %.2f", lf.path, r.total, r.discard, float64(r.discard)/float64(r.total))
 
 	// We can discard is below the threshold, we should skip the rewrite.
 	if float64(r.discard) < discardRatio*float64(r.total) {
-		tr.LazyPrintf("Skipping GC on fid: %d", lf.fid)
 		return ErrNoRewrite
 	}
 
@@ -1433,10 +1399,9 @@ func (vlog *valueLog) doRunGC(lf *logFile, discardRatio float64, tr trace.Trace)
 	if r.discard == r.total {
 		rewriteFunc = vlog.removeValueLog
 	}
-	if err = rewriteFunc(lf, tr); err != nil {
+	if err = rewriteFunc(lf); err != nil {
 		return err
 	}
-	tr.LazyPrintf("Done rewriting.")
 	return nil
 }
 
@@ -1453,18 +1418,13 @@ func (vlog *valueLog) waitOnGC(lc *y.Closer) {
 func (vlog *valueLog) runGC(discardRatio float64, head valuePointer) error {
 	select {
 	case vlog.garbageCh <- struct{}{}:
-		// Pick a log file for GC.
-		tr := trace.New("Badger.ValueLog", "GC")
-		tr.SetMaxEvents(100)
 		defer func() {
-			tr.Finish()
 			<-vlog.garbageCh
 		}()
 
 		var err error
-		files := vlog.pickLog(head, tr)
+		files := vlog.pickLog(head)
 		if len(files) == 0 {
-			tr.LazyPrintf("PickLog returned zero results.")
 			return ErrNoRewrite
 		}
 		tried := make(map[uint32]bool)
@@ -1479,7 +1439,7 @@ func (vlog *valueLog) runGC(discardRatio float64, head valuePointer) error {
 			}
 
 			vlog.opt.Logger.Infof("Running garbage collection on log: %s", lf.path)
-			err = vlog.doRunGC(lf, discardRatio, tr)
+			err = vlog.doRunGC(lf, discardRatio)
 			if err != nil && err != ErrNoRewrite {
 				vlog.opt.Logger.Errorf("Error while doing GC on log: %s. Error: %v", lf.path, err)
 				break
