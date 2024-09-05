@@ -76,7 +76,7 @@ func (lf *logFile) mmap(size int64) (err error) {
 		// Nothing to do
 		return nil
 	}
-	lf.fmap, err = y.Mmap(lf.fd, false, size)
+	lf.fmap, err = y.Mmap(lf.fd, false, size, 0)
 	if err == nil {
 		err = y.Madvise(lf.fmap, false) // Disable readahead
 	}

@@ -49,6 +49,9 @@ const (
 )
 
 var (
+	// This is MAP_POPULATE flag on platform that support it
+	MapPopulateFlag = 0x0
+
 	// This is O_DSYNC (datasync) on platforms that support it -- see file_unix.go
 	datasyncFileFlag = 0x0
 

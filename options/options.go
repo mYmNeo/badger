@@ -25,6 +25,8 @@ const (
 	FileIO FileLoadingMode = iota
 	// LoadToRAM indicates that file must be loaded into RAM
 	LoadToRAM
-	// MemoryMap indicates that that the file must be memory-mapped
+	// MemoryMap indicates that the file must be memory-mapped
 	MemoryMap
+	// MemoryMapWithPoplulate indicates that the file must be memory-mmaped with MAP_POPULATE flag
+	MemoryMapWithPopulate
 )

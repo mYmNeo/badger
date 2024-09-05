@@ -25,7 +25,7 @@ import (
 	"unsafe"
 )
 
-func mmap(fd *os.File, write bool, size int64) ([]byte, error) {
+func mmap(fd *os.File, write bool, size int64, flags int) ([]byte, error) {
 	protect := syscall.PAGE_READONLY
 	access := syscall.FILE_MAP_READ
 

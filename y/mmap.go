@@ -22,8 +22,8 @@ import (
 
 // Mmap uses the mmap system call to memory-map a file. If writable is true,
 // memory protection of the pages is set so that they may be written to as well.
-func Mmap(fd *os.File, writable bool, size int64) ([]byte, error) {
-	return mmap(fd, writable, size)
+func Mmap(fd *os.File, writable bool, size int64, flags int) ([]byte, error) {
+	return mmap(fd, writable, size, flags)
 }
 
 // Munmap unmaps a previously mapped slice.

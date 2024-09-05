@@ -90,7 +90,7 @@ func (t *Table) DecrRef() error {
 	// at least one reference pointing to them.
 
 	// It's necessary to delete windows files
-	if t.loadingMode == options.MemoryMap {
+	if t.loadingMode == options.MemoryMap || t.loadingMode == options.MemoryMapWithPopulate {
 		if err := y.Munmap(t.mmap); err != nil {
 			return err
 		}
@@ -142,13 +142,17 @@ func OpenTable(fd *os.File, mode options.FileLoadingMode, cksum []byte) (*Table,
 		loadingMode: mode,
 	}
 
+	mFlags := 0
 	switch mode {
 	case options.LoadToRAM:
 		if err := t.loadToRAM(); err != nil {
 			return nil, err
 		}
+	case options.MemoryMapWithPopulate:
+		mFlags = y.MapPopulateFlag
+		fallthrough
 	case options.MemoryMap:
-		t.mmap, err = y.Mmap(fd, false, fileInfo.Size())
+		t.mmap, err = y.Mmap(fd, false, fileInfo.Size(), mFlags)
 		if err != nil {
 			_ = fd.Close()
 			return nil, y.Wrapf(err, "Unable to map file: %q", fileInfo.Name())
@@ -185,7 +189,7 @@ func OpenTable(fd *os.File, mode options.FileLoadingMode, cksum []byte) (*Table,
 
 // Close closes the open table.  (Releases resources back to the OS.)
 func (t *Table) Close() error {
-	if t.loadingMode == options.MemoryMap {
+	if t.loadingMode == options.MemoryMap || t.loadingMode == options.MemoryMapWithPopulate {
 		if err := y.Munmap(t.mmap); err != nil {
 			return err
 		}
