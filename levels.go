@@ -112,7 +112,7 @@ func newLevelsController(db *DB, mf *Manifest) (*levelsController, error) {
 	// We found that using 3 goroutines allows disk throughput to be utilized to its max.
 	// Disk utilization is the main thing we should focus on, while trying to read the data. That's
 	// the one factor that remains constant between HDD and SSD.
-	throttle := y.NewThrottle(3)
+	throttle := y.NewThrottle(6)
 
 	start := time.Now()
 	var numOpened int32
@@ -604,7 +604,7 @@ nextTable:
 
 	var newTables []*table.Table
 	mu := new(sync.Mutex) // Guards newTables
-	inflightBuilders := y.NewThrottle(5)
+	inflightBuilders := y.NewThrottle(10)
 
 	var numBuilds, numVersions int
 	var lastKey, skipKey []byte
