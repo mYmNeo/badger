@@ -35,7 +35,6 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
-	"golang.org/x/sys/unix"
 
 	"github.com/dgraph-io/badger/options"
 	"github.com/dgraph-io/badger/y"
@@ -71,12 +70,12 @@ type logFile struct {
 	loadingMode options.FileLoadingMode
 }
 
-func (lf *logFile) mmap(size int64) (err error) {
+func (lf *logFile) mmap(size int64, flags int) (err error) {
 	if lf.loadingMode != options.MemoryMap {
 		// Nothing to do
 		return nil
 	}
-	lf.fmap, err = y.Mmap(lf.fd, false, size, 0)
+	lf.fmap, err = y.Mmap(lf.fd, false, size, flags)
 	if err == nil {
 		err = y.Madvise(lf.fmap, false) // Disable readahead
 	}
@@ -166,7 +165,7 @@ func (lf *logFile) doneWriting(offset uint32) error {
 	}
 	y.AssertTrue(sz <= math.MaxUint32)
 	lf.size = uint32(sz)
-	if err = lf.mmap(sz); err != nil {
+	if err = lf.mmap(sz, 0); err != nil {
 		_ = lf.fd.Close()
 		return errors.Wrapf(err, "Unable to map file: %q", fstat.Name())
 	}
@@ -564,10 +563,6 @@ func (vlog *valueLog) decrIteratorCount() error {
 	return nil
 }
 
-func (vlog *valueLog) reclaimMmap(lf *logFile) error {
-	return unix.Madvise(lf.fmap, unix.MADV_DONTNEED)
-}
-
 func (vlog *valueLog) deleteLogFileWithCleanup(lf *logFile) error {
 	if lf == nil {
 		return nil
@@ -729,7 +724,7 @@ func (vlog *valueLog) createVlogFile(fid uint32) (*logFile, error) {
 		return nil, errFile(err, vlog.dirPath, "Sync value log dir")
 	}
 
-	if err = lf.mmap(2 * vlog.opt.ValueLogFileSize); err != nil {
+	if err = lf.mmap(2*vlog.opt.ValueLogFileSize, 0); err != nil {
 		removeFile()
 		return nil, errFile(err, lf.path, "Mmap value log file")
 	}
@@ -837,7 +832,7 @@ func (vlog *valueLog) open(db *DB, ptr valuePointer, replayFn logEntry) error {
 		// replay it, and can just open it in readonly mode.
 		if fid < ptr.Fid {
 			// Mmap the file here, we don't need to replay it.
-			if err := lf.mmap(int64(lf.size)); err != nil {
+			if err := lf.mmap(int64(lf.size), 0); err != nil {
 				return err
 			}
 			continue
@@ -871,7 +866,7 @@ func (vlog *valueLog) open(db *DB, ptr valuePointer, replayFn logEntry) error {
 		if fid < vlog.maxFid {
 			// This file has been replayed. It can now be mmapped.
 			// For maxFid, the mmap would be done by the specially written code below.
-			if err := lf.mmap(int64(lf.size)); err != nil {
+			if err := lf.mmap(int64(lf.size), 0); err != nil {
 				return err
 			}
 		}
@@ -893,7 +888,7 @@ func (vlog *valueLog) open(db *DB, ptr valuePointer, replayFn logEntry) error {
 	vlog.db.vhead = valuePointer{Fid: vlog.maxFid, Offset: uint32(lastOffset)}
 
 	// Map the file if needed. When we create a file, it is automatically mapped.
-	if err = last.mmap(2 * db.opt.ValueLogFileSize); err != nil {
+	if err = last.mmap(2*db.opt.ValueLogFileSize, 0); err != nil {
 		return errFile(err, last.path, "Map log file")
 	}
 	return nil
