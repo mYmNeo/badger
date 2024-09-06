@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
+	"golang.org/x/sys/unix"
 
 	"github.com/dgraph-io/badger/options"
 	"github.com/dgraph-io/badger/y"
@@ -571,6 +572,7 @@ func (vlog *valueLog) deleteLogFileWithCleanup(lf *logFile) error {
 	defer lf.lock.Unlock()
 
 	path := vlog.fpath(lf.fid)
+	unix.Madvise(lf.fmap, unix.MADV_DONTNEED)
 	if err := lf.munmap(); err != nil {
 		_ = lf.fd.Close()
 		return err
