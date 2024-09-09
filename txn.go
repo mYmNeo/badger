@@ -47,6 +47,7 @@ type oracle struct {
 	// commits stores a key fingerprint and latest commit counter for it.
 	// refCount is used to clear out commits map to avoid a memory blowup.
 	commits       map[uint64]uint64
+	committedTxn  []committedTxn
 	lastCleanupTs uint64
 
 	// closer is used to stop watermarks.
@@ -59,6 +60,12 @@ type oracle struct {
 	writeChLock sync.Mutex
 
 	isManaged bool // Does not change value, so no locking required.
+}
+
+type committedTxn struct {
+	ts uint64
+	// ConflictKeys Keeps track of the entries written at timestamp ts.
+	conflictKeys []uint64
 }
 
 func newOracle(opt Options) *oracle {
@@ -171,6 +178,11 @@ func (o *oracle) newCommitTs(txn *Txn) uint64 {
 
 	y.AssertTrue(ts >= o.lastCleanupTs)
 
+	o.committedTxn = append(o.committedTxn, committedTxn{
+		ts:           ts,
+		conflictKeys: txn.writes,
+	})
+
 	for _, w := range txn.writes {
 		o.commits[w] = ts // Update the commitTs.
 	}
@@ -208,11 +220,17 @@ func (o *oracle) cleanupCommittedTransactions() { // Must be called under o.Lock
 	}
 	o.lastCleanupTs = maxReadTs
 
-	for key, ts := range o.commits {
-		if ts <= maxReadTs {
+	var i int
+	for i = 0; i < len(o.committedTxn); i++ {
+		if o.committedTxn[i].ts > maxReadTs {
+			break
+		}
+
+		for _, key := range o.committedTxn[i].conflictKeys {
 			delete(o.commits, key)
 		}
 	}
+	o.committedTxn = o.committedTxn[i:]
 }
 
 func (o *oracle) doneCommit(cts uint64) {
