@@ -275,7 +275,7 @@ func (s *levelsController) dropPrefixes(prefixes [][]byte) error {
 			l.RUnlock()
 
 			if size > 0 {
-				cp := compactionPriority{
+				cp := &compactionPriority{
 					level: 0,
 					score: 1.74,
 					// A unique number greater than 1.0 does two things. Helps identify this
@@ -359,7 +359,7 @@ func (s *levelsController) runCompactor(id int, lc *y.Closer) {
 		return
 	}
 
-	moveL0toFront := func(prios []compactionPriority) []compactionPriority {
+	moveL0toFront := func(prios []*compactionPriority) []*compactionPriority {
 		idx := -1
 		for i, p := range prios {
 			if p.level == 0 {
@@ -370,7 +370,7 @@ func (s *levelsController) runCompactor(id int, lc *y.Closer) {
 		// If idx == -1, we didn't find L0.
 		// If idx == 0, then we don't need to do anything. L0 is already at the front.
 		if idx > 0 {
-			out := append([]compactionPriority{}, prios[idx])
+			out := append([]*compactionPriority{}, prios[idx])
 			out = append(out, prios[:idx]...)
 			out = append(out, prios[idx+1:]...)
 			return out
@@ -378,7 +378,7 @@ func (s *levelsController) runCompactor(id int, lc *y.Closer) {
 		return prios
 	}
 
-	run := func(p compactionPriority) bool {
+	run := func(p *compactionPriority) bool {
 		s.kv.opt.Debugf("Compaction priority: %+v", p)
 		err := s.doCompact(id, p)
 		switch err {
@@ -392,7 +392,7 @@ func (s *levelsController) runCompactor(id int, lc *y.Closer) {
 		return false
 	}
 
-	var priosBuffer []compactionPriority
+	var priosBuffer []*compactionPriority
 	runOnce := func() bool {
 		prios := s.pickCompactLevels(priosBuffer)
 		defer func() {
@@ -447,16 +447,21 @@ type compactionPriority struct {
 	score        float64
 	adjusted     float64
 	dropPrefixes [][]byte
+	// dryRun is set to true when we want to simulate a compaction. In this case, we don't actually
+	// build the tables, but just calculate the deletedTableSize and addedTableSize.
+	dryRun            bool
+	deletedTablesSize int64
+	addedTablesSize   int64
 }
 
 // pickCompactLevel determines which level to compact.
 // Based on: https://github.com/facebook/rocksdb/wiki/Leveled-Compaction
-func (s *levelsController) pickCompactLevels(priosBuffer []compactionPriority) (prios []compactionPriority) {
+func (s *levelsController) pickCompactLevels(priosBuffer []*compactionPriority) (prios []*compactionPriority) {
 	// This function must use identical criteria for guaranteeing compaction's progress that
 	// addLevel0Table uses.
 
 	addPriority := func(level int, score float64) {
-		pri := compactionPriority{
+		pri := &compactionPriority{
 			level:    level,
 			score:    score,
 			adjusted: score,
@@ -466,7 +471,7 @@ func (s *levelsController) pickCompactLevels(priosBuffer []compactionPriority) (
 
 	// Grow buffer to fit all levels.
 	if cap(priosBuffer) < len(s.levels) {
-		priosBuffer = make([]compactionPriority, 0, len(s.levels))
+		priosBuffer = make([]*compactionPriority, 0, len(s.levels))
 	}
 	prios = priosBuffer[:0]
 
@@ -1113,7 +1118,7 @@ func (s *levelsController) runCompactDef(l int, cd *compactDef) (err error) {
 var errFillTables = errors.New("Unable to fill tables")
 
 // doCompact picks some table on level l and compacts it away to the next level.
-func (s *levelsController) doCompact(id int, p compactionPriority) error {
+func (s *levelsController) doCompact(id int, p *compactionPriority) error {
 	l := p.level
 	y.AssertTrue(l+1 < s.kv.opt.MaxLevels) // Sanity check.
 

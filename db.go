@@ -483,7 +483,7 @@ func (db *DB) close() (err error) {
 	// Force Compact L0
 	// We don't need to care about cstatus since no parallel compaction is running.
 	if db.opt.CompactL0OnClose {
-		err := db.lc.doCompact(173, compactionPriority{level: 0, score: 1.73})
+		err := db.lc.doCompact(173, &compactionPriority{level: 0, score: 1.73})
 		switch err {
 		case errFillTables:
 			// This error only means that there might be enough tables to do a compaction. So, we
@@ -1334,7 +1334,7 @@ func (db *DB) Flatten(workers int) error {
 	db.stopCompactions()
 	defer db.startCompactions()
 
-	compactAway := func(cp compactionPriority) error {
+	compactAway := func(cp *compactionPriority) error {
 		db.opt.Infof("Attempting to compact with %+v\n", cp)
 		errCh := make(chan error, 1)
 		for i := 0; i < workers; i++ {
@@ -1389,7 +1389,7 @@ func (db *DB) Flatten(workers int) error {
 			continue
 		}
 		// Create an artificial compaction priority, to ensure that we compact the level.
-		cp := compactionPriority{level: levels[0], score: 1.71}
+		cp := &compactionPriority{level: levels[0], score: 1.71}
 		if err := compactAway(cp); err != nil {
 			return err
 		}
