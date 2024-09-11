@@ -86,9 +86,7 @@ func (r *keyRange) isEmpty() bool {
 }
 
 func getKeyRange(tables ...*table.Table) keyRange {
-	if len(tables) == 0 {
-		return keyRange{}
-	}
+	y.AssertTrue(len(tables) > 0)
 	smallest := tables[0].Smallest()
 	biggest := tables[0].Biggest()
 	for i := 1; i < len(tables); i++ {
@@ -190,11 +188,11 @@ func (cs *compactStatus) compareAndAdd(_ thisAndNextLevelRLocked, cd compactDef)
 
 	thisLevel.ranges = append(thisLevel.ranges, cd.thisRange)
 	nextLevel.ranges = append(nextLevel.ranges, cd.nextRange)
-	thisLevel.delSize += cd.thisSize
+	thisLevel.delSize += cd.topSize
 	return true
 }
 
-func (cs *compactStatus) delete(cd compactDef) {
+func (cs *compactStatus) delete(cd *compactDef) {
 	cs.Lock()
 	defer cs.Unlock()
 
@@ -204,14 +202,9 @@ func (cs *compactStatus) delete(cd compactDef) {
 	thisLevel := cs.levels[cd.thisLevel.level]
 	nextLevel := cs.levels[cd.nextLevel.level]
 
-	thisLevel.delSize -= cd.thisSize
+	thisLevel.delSize -= cd.topSize
 	found := thisLevel.remove(cd.thisRange)
-	// The following check makes sense only if we're compacting more than one
-	// table. In case of the max level, we might rewrite a single table to
-	// remove stale data.
-	if cd.thisLevel != cd.nextLevel && !cd.nextRange.isEmpty() {
-		found = nextLevel.remove(cd.nextRange) && found
-	}
+	found = nextLevel.remove(cd.nextRange) && found
 
 	if !found {
 		this := cd.thisRange

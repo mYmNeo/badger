@@ -19,6 +19,7 @@ package badger
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/pkg/errors"
@@ -69,9 +70,7 @@ func (s *levelHandler) initTables(tables []*table.Table) {
 		})
 	} else {
 		// Sort tables by keys.
-		sort.Slice(s.tables, func(i, j int) bool {
-			return y.CompareKeys(s.tables[i].Smallest(), s.tables[j].Smallest()) < 0
-		})
+		sortTables(s.tables)
 	}
 }
 
@@ -96,47 +95,86 @@ func (s *levelHandler) deleteTables(toDel []*table.Table) error {
 	}
 	s.tables = newTables
 
+	assertTablesOrder(s.level, newTables, nil)
 	s.Unlock() // Unlock s _before_ we DecrRef our tables, which can be slow.
 
 	return decrRefs(toDel)
 }
 
+func assertTablesOrder(level int, tables []*table.Table, cd *compactDef) {
+	if level == 0 {
+		return
+	}
+
+	for i := 0; i < len(tables)-1; i++ {
+		if y.CompareKeys(tables[i].Smallest(), tables[i].Biggest()) > 0 ||
+			y.CompareKeys(tables[i].Smallest(), tables[i+1].Smallest()) >= 0 ||
+			y.CompareKeys(tables[i].Biggest(), tables[i+1].Biggest()) >= 0 {
+
+			var sb strings.Builder
+			if cd != nil {
+				fmt.Fprintf(&sb, "%s\n", cd.String())
+			}
+			fmt.Fprintf(&sb, "the order of level %d tables is invalid:\n", level)
+			for idx, tbl := range tables {
+				tag := "  "
+				if idx == i {
+					tag = "->"
+				}
+				fmt.Fprintf(&sb, "%s %v %v\n", tag, tbl.Smallest(), tbl.Biggest())
+			}
+			panic(sb.String())
+		}
+	}
+}
+
+func sortTables(tables []*table.Table) {
+	sort.Slice(tables, func(i, j int) bool {
+		return y.CompareKeys(tables[i].Smallest(), tables[j].Smallest()) < 0
+	})
+}
+
 // replaceTables will replace tables[left:right] with newTables. Note this EXCLUDES tables[right].
 // You must call decr() to delete the old tables _after_ writing the update to the manifest.
-func (s *levelHandler) replaceTables(toDel, toAdd []*table.Table) error {
+func (s *levelHandler) replaceTables(toDel, toAdd []*table.Table, cd *compactDef) error {
+	// Do not return even if len(newTables) is 0 because we need to delete bottom tables.
+	assertTablesOrder(s.level, toAdd, cd)
 	// Need to re-search the range of tables in this level to be replaced as other goroutines might
 	// be changing it as well.  (They can't touch our tables, but if they add/remove other tables,
 	// the indices get shifted around.)
 	s.Lock() // We s.Unlock() below.
 
-	toDelMap := make(map[uint64]struct{})
-	for _, t := range toDel {
-		toDelMap[t.ID()] = struct{}{}
-	}
-	var newTables []*table.Table
-	for _, t := range s.tables {
-		_, found := toDelMap[t.ID()]
-		if !found {
-			newTables = append(newTables, t)
-			continue
-		}
-		s.totalSize -= t.Size()
-	}
-
 	// Increase totalSize first.
-	for _, t := range toAdd {
-		s.totalSize += t.Size()
-		t.IncrRef()
-		newTables = append(newTables, t)
+	for _, tbl := range toAdd {
+		tbl.IncrRef()
+		s.totalSize += tbl.Size()
 	}
-
-	// Assign tables.
-	s.tables = newTables
-	sort.Slice(s.tables, func(i, j int) bool {
-		return y.CompareKeys(s.tables[i].Smallest(), s.tables[j].Smallest()) < 0
-	})
-	s.Unlock() // s.Unlock before we DecrRef tables -- that can be slow.
+	left, right := s.overlappingTables(levelHandlerRLocked{}, cd.nextRange)
+	// Update totalSize and reference counts.
+	for i := left; i < right; i++ {
+		tbl := s.tables[i]
+		if containsTable(toDel, tbl) {
+			s.totalSize -= tbl.Size()
+		}
+	}
+	tables := make([]*table.Table, 0, left+len(toAdd)+(len(s.tables)-right))
+	tables = append(tables, s.tables[:left]...)
+	tables = append(tables, toAdd...)
+	tables = append(tables, s.tables[right:]...)
+	sortTables(tables)
+	assertTablesOrder(s.level, tables, cd)
+	s.tables = tables
+	s.Unlock()
 	return decrRefs(toDel)
+}
+
+func containsTable(tables []*table.Table, tbl *table.Table) bool {
+	for _, t := range tables {
+		if tbl == t {
+			return true
+		}
+	}
+	return false
 }
 
 // addTable adds toAdd table to levelHandler. Normally when we add tables to levelHandler, we sort
@@ -314,14 +352,15 @@ type levelHandlerRLocked struct{}
 // This function should already have acquired a read lock, and this is so important the caller must
 // pass an empty parameter declaring such.
 func (s *levelHandler) overlappingTables(_ levelHandlerRLocked, kr keyRange) (int, int) {
-	if len(kr.left) == 0 || len(kr.right) == 0 {
-		return 0, 0
-	}
-	left := sort.Search(len(s.tables), func(i int) bool {
-		return y.CompareKeys(kr.left, s.tables[i].Biggest()) <= 0
+	return getTablesInRange(s.tables, kr.left, kr.right)
+}
+
+func getTablesInRange(tbls []*table.Table, start, end []byte) (int, int) {
+	left := sort.Search(len(tbls), func(i int) bool {
+		return y.CompareKeys(start, tbls[i].Biggest()) <= 0
 	})
-	right := sort.Search(len(s.tables), func(i int) bool {
-		return y.CompareKeys(kr.right, s.tables[i].Smallest()) < 0
+	right := sort.Search(len(tbls), func(i int) bool {
+		return y.CompareKeys(end, tbls[i].Smallest()) < 0
 	})
 	return left, right
 }

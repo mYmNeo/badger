@@ -183,11 +183,12 @@ func TestCompaction(t *testing.T) {
 				{"foo", "bar", 3, 0}, {"foo", "bar", 2, 0},
 				{"foo", "bar", 1, 0}, {"fooz", "baz", 1, 0},
 			})
-			cdef := compactDef{
+			cdef := &compactDef{
 				thisLevel: db.lc.levels[0],
 				nextLevel: db.lc.levels[1],
 				top:       db.lc.levels[0].tables,
 				bot:       db.lc.levels[1].tables,
+				nextRange: getKeyRange(db.lc.levels[1].tables...),
 			}
 			require.NoError(t, db.lc.runCompactDef(0, cdef))
 			// foo version 2 should be dropped after compaction.
@@ -214,11 +215,12 @@ func TestCompaction(t *testing.T) {
 				{"foo", "bar", 4, 0}, {"foo", "barNew", 3, 0},
 				{"fooz", "baz", 1, 0},
 			})
-			cdef := compactDef{
+			cdef := &compactDef{
 				thisLevel: db.lc.levels[0],
 				nextLevel: db.lc.levels[1],
 				top:       db.lc.levels[0].tables,
 				bot:       db.lc.levels[1].tables,
+				nextRange: getKeyRange(db.lc.levels[1].tables...),
 			}
 			require.NoError(t, db.lc.runCompactDef(0, cdef))
 			// foo version 3 (both) should be dropped after compaction.
@@ -247,11 +249,12 @@ func TestCompaction(t *testing.T) {
 				{"foo", "bar", 3, 0}, {"foo", "bar", 2, 0}, {"foo", "bar", 1, 0},
 				{"foo", "bar", 0, 0}, {"fooz", "baz", 1, 0},
 			})
-			cdef := compactDef{
+			cdef := &compactDef{
 				thisLevel: db.lc.levels[0],
 				nextLevel: db.lc.levels[1],
 				top:       db.lc.levels[0].tables,
 				bot:       db.lc.levels[1].tables,
+				nextRange: getKeyRange(db.lc.levels[1].tables...),
 			}
 			require.NoError(t, db.lc.runCompactDef(0, cdef))
 			// foo version 2 and version 1 should be dropped after compaction.
@@ -274,11 +277,12 @@ func TestCompaction(t *testing.T) {
 			getAllAndCheck(t, db, []keyValVersion{
 				{"foo", "bar", 3, 0}, {"foo", "bar", 2, 0}, {"fooz", "baz", 1, 0},
 			})
-			cdef := compactDef{
+			cdef := &compactDef{
 				thisLevel: db.lc.levels[1],
 				nextLevel: db.lc.levels[2],
 				top:       db.lc.levels[1].tables,
 				bot:       db.lc.levels[2].tables,
+				nextRange: getKeyRange(db.lc.levels[2].tables...),
 			}
 			require.NoError(t, db.lc.runCompactDef(1, cdef))
 			// foo version 2 should be dropped after compaction.
@@ -305,11 +309,12 @@ func TestCompaction(t *testing.T) {
 					{"foo", "bar", 1, 0},
 					{"fooz", "baz", 1, 1},
 				})
-				cdef := compactDef{
+				cdef := &compactDef{
 					thisLevel: db.lc.levels[1],
 					nextLevel: db.lc.levels[2],
 					top:       db.lc.levels[1].tables,
 					bot:       db.lc.levels[2].tables,
+					nextRange: getKeyRange(db.lc.levels[2].tables...),
 				}
 				require.NoError(t, db.lc.runCompactDef(1, cdef))
 				// foo bar version 2 should be dropped after compaction. fooz
@@ -323,11 +328,12 @@ func TestCompaction(t *testing.T) {
 					{"fooz", "baz", 1, 1},
 				})
 
-				cdef = compactDef{
+				cdef = &compactDef{
 					thisLevel: db.lc.levels[2],
 					nextLevel: db.lc.levels[3],
 					top:       db.lc.levels[2].tables,
 					bot:       db.lc.levels[3].tables,
+					nextRange: getKeyRange(db.lc.levels[3].tables...),
 				}
 				require.NoError(t, db.lc.runCompactDef(2, cdef))
 				// everything should be removed now
@@ -352,11 +358,12 @@ func TestCompaction(t *testing.T) {
 					{"fooz", "baz", 2, bitDelete},
 					{"fooz", "baz", 1, 0},
 				})
-				cdef := compactDef{
+				cdef := &compactDef{
 					thisLevel: db.lc.levels[1],
 					nextLevel: db.lc.levels[2],
 					top:       db.lc.levels[1].tables,
 					bot:       db.lc.levels[2].tables,
+					nextRange: getKeyRange(db.lc.levels[2].tables...),
 				}
 				require.NoError(t, db.lc.runCompactDef(1, cdef))
 				// the top table at L1 doesn't overlap L3, but the bottom table at L2
@@ -381,11 +388,12 @@ func TestCompaction(t *testing.T) {
 				getAllAndCheck(t, db, []keyValVersion{
 					{"foo", "bar", 3, 1}, {"fooo", "barr", 2, 0}, {"fooz", "baz", 1, 1},
 				})
-				cdef := compactDef{
+				cdef := &compactDef{
 					thisLevel: db.lc.levels[1],
 					nextLevel: db.lc.levels[2],
 					top:       db.lc.levels[1].tables,
 					bot:       db.lc.levels[2].tables,
+					nextRange: getKeyRange(db.lc.levels[2].tables...),
 				}
 				require.NoError(t, db.lc.runCompactDef(1, cdef))
 				// foo version 2 should be dropped after compaction.
@@ -417,11 +425,12 @@ func TestCompactionTwoVersions(t *testing.T) {
 				{"foo", "bar", 1, 0},
 				{"fooz", "baz", 1, 1},
 			})
-			cdef := compactDef{
+			cdef := &compactDef{
 				thisLevel: db.lc.levels[1],
 				nextLevel: db.lc.levels[2],
 				top:       db.lc.levels[1].tables,
 				bot:       db.lc.levels[2].tables,
+				nextRange: getKeyRange(db.lc.levels[2].tables...),
 			}
 			require.NoError(t, db.lc.runCompactDef(1, cdef))
 			// Nothing should be dropped after compaction because number of
@@ -433,11 +442,12 @@ func TestCompactionTwoVersions(t *testing.T) {
 				{"fooz", "baz", 1, 1},
 			})
 
-			cdef = compactDef{
+			cdef = &compactDef{
 				thisLevel: db.lc.levels[2],
 				nextLevel: db.lc.levels[3],
 				top:       db.lc.levels[2].tables,
 				bot:       db.lc.levels[3].tables,
+				nextRange: getKeyRange(db.lc.levels[3].tables...),
 			}
 			require.NoError(t, db.lc.runCompactDef(2, cdef))
 			getAllAndCheck(t, db, []keyValVersion{
@@ -470,11 +480,12 @@ func TestCompactionAllVersions(t *testing.T) {
 				{"foo", "bar", 1, 0},
 				{"fooz", "baz", 1, 1},
 			})
-			cdef := compactDef{
+			cdef := &compactDef{
 				thisLevel: db.lc.levels[1],
 				nextLevel: db.lc.levels[2],
 				top:       db.lc.levels[1].tables,
 				bot:       db.lc.levels[2].tables,
+				nextRange: getKeyRange(db.lc.levels[2].tables...),
 			}
 			require.NoError(t, db.lc.runCompactDef(1, cdef))
 			// Nothing should be dropped after compaction because all versions
@@ -486,11 +497,12 @@ func TestCompactionAllVersions(t *testing.T) {
 				{"fooz", "baz", 1, 1},
 			})
 
-			cdef = compactDef{
+			cdef = &compactDef{
 				thisLevel: db.lc.levels[2],
 				nextLevel: db.lc.levels[3],
 				top:       db.lc.levels[2].tables,
 				bot:       db.lc.levels[3].tables,
+				nextRange: getKeyRange(db.lc.levels[3].tables...),
 			}
 			require.NoError(t, db.lc.runCompactDef(2, cdef))
 			getAllAndCheck(t, db, []keyValVersion{
@@ -513,11 +525,12 @@ func TestCompactionAllVersions(t *testing.T) {
 			getAllAndCheck(t, db, []keyValVersion{
 				{"foo", "bar", 3, 1}, {"fooo", "barr", 2, 0}, {"fooz", "baz", 1, 1},
 			})
-			cdef := compactDef{
+			cdef := &compactDef{
 				thisLevel: db.lc.levels[1],
 				nextLevel: db.lc.levels[2],
 				top:       db.lc.levels[1].tables,
 				bot:       db.lc.levels[2].tables,
+				nextRange: getKeyRange(db.lc.levels[2].tables...),
 			}
 			require.NoError(t, db.lc.runCompactDef(1, cdef))
 			// foo version 2 should be dropped after compaction.
@@ -548,11 +561,12 @@ func TestHeadKeyCleanup(t *testing.T) {
 			{string(head), "foo", 5, 0}, {string(head), "bar", 4, 0}, {string(head), "baz", 3, 0},
 			{string(head), "fooz", 2, 0}, {string(head), "foozbaz", 1, 0},
 		})
-		cdef := compactDef{
+		cdef := &compactDef{
 			thisLevel: db.lc.levels[0],
 			nextLevel: db.lc.levels[1],
 			top:       db.lc.levels[0].tables,
 			bot:       db.lc.levels[1].tables,
+			nextRange: getKeyRange(db.lc.levels[1].tables...),
 		}
 		require.NoError(t, db.lc.runCompactDef(0, cdef))
 		// foo version 2 should be dropped after compaction.
@@ -583,11 +597,12 @@ func TestDiscardTs(t *testing.T) {
 				{"foo", "bar", 4, 0}, {"foo", "bar", 3, 0},
 				{"foo", "bar", 2, 0}, {"fooz", "baz", 3, 0},
 			})
-			cdef := compactDef{
+			cdef := &compactDef{
 				thisLevel: db.lc.levels[0],
 				nextLevel: db.lc.levels[1],
 				top:       db.lc.levels[0].tables,
 				bot:       db.lc.levels[1].tables,
+				nextRange: getKeyRange(db.lc.levels[1].tables...),
 			}
 			require.NoError(t, db.lc.runCompactDef(0, cdef))
 			// No keys should be dropped.
@@ -614,11 +629,12 @@ func TestDiscardTs(t *testing.T) {
 				{"foo", "bar", 4, 0}, {"foo", "bar", 3, 0}, {"foo", "bar", 2, 0},
 				{"foo", "bbb", 1, 0}, {"fooz", "baz", 2, 0},
 			})
-			cdef := compactDef{
+			cdef := &compactDef{
 				thisLevel: db.lc.levels[0],
 				nextLevel: db.lc.levels[1],
 				top:       db.lc.levels[0].tables,
 				bot:       db.lc.levels[1].tables,
+				nextRange: getKeyRange(db.lc.levels[1].tables...),
 			}
 			require.NoError(t, db.lc.runCompactDef(0, cdef))
 			// foo1 and foo2 should be dropped.
@@ -645,11 +661,12 @@ func TestDiscardTs(t *testing.T) {
 				{"foo", "bar", 4, 0}, {"foo", "bar", 3, 0},
 				{"foo", "bar", 2, 0}, {"fooz", "baz", 3, 0},
 			})
-			cdef := compactDef{
+			cdef := &compactDef{
 				thisLevel: db.lc.levels[0],
 				nextLevel: db.lc.levels[1],
 				top:       db.lc.levels[0].tables,
 				bot:       db.lc.levels[1].tables,
+				nextRange: getKeyRange(db.lc.levels[1].tables...),
 			}
 			require.NoError(t, db.lc.runCompactDef(0, cdef))
 			// Only one version of every key should be left.
@@ -686,11 +703,12 @@ func TestDiscardFirstVersion(t *testing.T) {
 		db.SetDiscardTs(7)
 
 		// Compact L0 to L1
-		cdef := compactDef{
+		cdef := &compactDef{
 			thisLevel: db.lc.levels[0],
 			nextLevel: db.lc.levels[1],
 			top:       db.lc.levels[0].tables,
 			bot:       db.lc.levels[1].tables,
+			nextRange: getKeyRange(db.lc.levels[0].tables...),
 		}
 		require.NoError(t, db.lc.runCompactDef(0, cdef))
 

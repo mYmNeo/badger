@@ -174,7 +174,7 @@ func TestOverlappingKeyRangeError(t *testing.T) {
 	done := lh0.tryAddLevel0Table(t1)
 	require.Equal(t, true, done)
 
-	cd := compactDef{
+	cd := &compactDef{
 		thisLevel: lh0,
 		nextLevel: lh1,
 	}
@@ -182,7 +182,7 @@ func TestOverlappingKeyRangeError(t *testing.T) {
 	manifest := createManifest()
 	lc, err := newLevelsController(kv, &manifest)
 	require.NoError(t, err)
-	done = lc.fillTablesL0(&cd)
+	done = lc.fillTablesL0(cd)
 	require.Equal(t, true, done)
 	lc.runCompactDef(0, cd)
 
@@ -193,11 +193,11 @@ func TestOverlappingKeyRangeError(t *testing.T) {
 	done = lh0.tryAddLevel0Table(t2)
 	require.Equal(t, true, done)
 
-	cd = compactDef{
+	cd = &compactDef{
 		thisLevel: lh0,
 		nextLevel: lh1,
 	}
-	lc.fillTablesL0(&cd)
+	lc.fillTablesL0(cd)
 	lc.runCompactDef(0, cd)
 }
 
