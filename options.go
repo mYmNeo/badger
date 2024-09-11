@@ -61,6 +61,7 @@ type Options struct {
 	ValueLogFileSize   int64
 	ValueLogMaxEntries uint32
 
+	StopCompactor     bool
 	NumCompactors     int
 	CompactL0OnClose  bool
 	LogRotatesToFlush int32

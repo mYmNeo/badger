@@ -290,8 +290,12 @@ func Open(opt Options) (db *DB, err error) {
 	db.vlog.init(db)
 
 	if !opt.ReadOnly {
-		db.closers.compactors = y.NewCloser(1)
-		db.lc.startCompact(db.closers.compactors)
+		if opt.StopCompactor {
+			db.opt.Logger.Infof("User disabled compactor.")
+		} else {
+			db.closers.compactors = y.NewCloser(1)
+			db.lc.startCompact(db.closers.compactors)
+		}
 
 		db.closers.memtable = y.NewCloser(1)
 		go func() {
@@ -1289,6 +1293,9 @@ func (db *DB) stopMemoryFlush() {
 }
 
 func (db *DB) stopCompactions() {
+	if db.opt.StopCompactor {
+		return
+	}
 	// Stop compactions.
 	if db.closers.compactors != nil {
 		db.closers.compactors.SignalAndWait()
@@ -1296,6 +1303,10 @@ func (db *DB) stopCompactions() {
 }
 
 func (db *DB) startCompactions() {
+	if db.opt.StopCompactor {
+		db.opt.Logger.Infof("User disabled compactions")
+		return
+	}
 	// Resume compactions.
 	if db.closers.compactors != nil {
 		db.closers.compactors = y.NewCloser(1)
