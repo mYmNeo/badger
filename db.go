@@ -1396,6 +1396,16 @@ func (db *DB) Flatten(workers int) error {
 	}
 }
 
+// CompactLevel can be used to manually trigger a compaction for a specific level. This is useful
+// when you want to ensure all versions of keys are colocated.
+func (db *DB) CompactLevel(level int, dryRun bool) (int64, int64, error) {
+	db.stopCompactions()
+	defer db.startCompactions()
+
+	cp := &compactionPriority{level: level, score: 1.71, dryRun: dryRun}
+	return cp.botSize, cp.newBotSize, db.lc.doCompact(175, cp)
+}
+
 func (db *DB) blockWrite() error {
 	// Stop accepting new writes.
 	if !atomic.CompareAndSwapInt32(&db.blockWrites, 0, 1) {

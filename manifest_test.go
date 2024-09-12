@@ -184,7 +184,7 @@ func TestOverlappingKeyRangeError(t *testing.T) {
 	require.NoError(t, err)
 	done = lc.fillTablesL0(cd)
 	require.Equal(t, true, done)
-	lc.runCompactDef(0, cd)
+	lc.runCompactDef(0, cd, false)
 
 	f = buildTestTable(t, "l", 2)
 	t2, err := table.OpenTable(f, options.MemoryMap, nil)
@@ -198,7 +198,7 @@ func TestOverlappingKeyRangeError(t *testing.T) {
 		nextLevel: lh1,
 	}
 	lc.fillTablesL0(cd)
-	lc.runCompactDef(0, cd)
+	lc.runCompactDef(0, cd, false)
 }
 
 func TestManifestRewrite(t *testing.T) {

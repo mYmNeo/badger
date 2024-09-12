@@ -329,7 +329,7 @@ func (s *levelsController) dropPrefixes(prefixes [][]byte) error {
 				dropPrefixes: prefixes,
 				nextRange:    getKeyRange(operation...),
 			}
-			if err := s.runCompactDef(l.level, cd); err != nil {
+			if err := s.runCompactDef(l.level, cd, false); err != nil {
 				opt.Warningf("While running compact def: %+v. Error: %v", cd, err)
 				return err
 			}
@@ -449,9 +449,10 @@ type compactionPriority struct {
 	dropPrefixes [][]byte
 	// dryRun is set to true when we want to simulate a compaction. In this case, we don't actually
 	// build the tables, but just calculate the deletedTableSize and addedTableSize.
-	dryRun            bool
-	deletedTablesSize int64
-	addedTablesSize   int64
+	dryRun bool
+
+	botSize    int64
+	newBotSize int64
 }
 
 // pickCompactLevel determines which level to compact.
@@ -544,8 +545,7 @@ func (s *levelsController) checkOverlap(tables []*table.Table, lev int) bool {
 }
 
 // compactBuildTables merges topTables and botTables to form a list of new tables.
-func (s *levelsController) compactBuildTables(
-	lev int, cd *compactDef) ([]*table.Table, func() error, error) {
+func (s *levelsController) compactBuildTables(lev int, cd *compactDef, dryRun bool) (interface{}, func() error, error) {
 	topTables := cd.top
 	botTables := cd.bot
 
@@ -595,9 +595,13 @@ nextTable:
 	// that would affect the snapshot view guarantee provided by transactions.
 	discardTs := s.kv.orc.discardAtOrBelow()
 
-	var newTables []*table.Table
+	var newTi []table.TableInterface
 	mu := new(sync.Mutex) // Guards newTables
-	inflightBuilders := y.NewThrottle(10)
+	maxConcurrentBuild := 10
+	if dryRun {
+		maxConcurrentBuild = 1000
+	}
+	inflightBuilders := y.NewThrottle(maxConcurrentBuild)
 
 	var numBuilds, numVersions int
 	var lastKey, skipKey []byte
@@ -700,43 +704,51 @@ nextTable:
 			continue
 		}
 		numBuilds++
-		fileID := s.reserveFileID()
 		if err := inflightBuilders.Do(); err != nil {
 			// Can't return from here, until I decrRef all the tables that I built so far.
 			break
 		}
 
-		go func(builder *table.Builder, fid uint64) {
-			var err error
+		build := func(builder *table.Builder) (table.TableInterface, error) {
+			fileID := s.reserveFileID()
+			fd, err := y.CreateSyncedFile(table.NewFilename(fileID, s.kv.opt.Dir), true)
+			if err != nil {
+				return nil, errors.Wrapf(err, "While opening new table: %d", fileID)
+			}
+
+			if _, err := fd.Write(builder.Finish()); err != nil {
+				return nil, errors.Wrapf(err, "Unable to write to file: %d", fileID)
+			}
+			newTbl, err := table.OpenTable(fd, s.kv.opt.TableLoadingMode, nil)
+			// decrRef is added below.
+			return newTbl, errors.Wrapf(err, "Unable to open table: %q", fd.Name())
+		}
+
+		if dryRun {
+			build = func(builder *table.Builder) (table.TableInterface, error) {
+				return table.NewEmptyTable(int64(len(builder.Finish()))), nil
+			}
+		}
+
+		go func(builder *table.Builder) {
+			var (
+				err error
+				tbl table.TableInterface
+			)
 
 			defer builder.Close()
 			defer inflightBuilders.Done(err)
 
-			build := func(fileID uint64) (*table.Table, error) {
-				fd, err := y.CreateSyncedFile(table.NewFilename(fileID, s.kv.opt.Dir), true)
-				if err != nil {
-					return nil, errors.Wrapf(err, "While opening new table: %d", fileID)
-				}
-
-				if _, err := fd.Write(builder.Finish()); err != nil {
-					return nil, errors.Wrapf(err, "Unable to write to file: %d", fileID)
-				}
-				newTbl, err := table.OpenTable(fd, s.kv.opt.TableLoadingMode, nil)
-				// decrRef is added below.
-				return newTbl, errors.Wrapf(err, "Unable to open table: %q", fd.Name())
-			}
-
-			var tbl *table.Table
-			tbl, err = build(fid)
+			tbl, err = build(builder)
 			// If we couldn't build the table, return fast.
 			if err != nil {
 				return
 			}
 
 			mu.Lock()
-			newTables = append(newTables, tbl)
+			newTi = append(newTi, tbl)
 			mu.Unlock()
-		}(builder, fileID)
+		}(builder)
 	}
 
 	// Wait for all table builders to finish and also for newTables accumulator to finish.
@@ -746,6 +758,15 @@ nextTable:
 		// from not doing this ASAP after all file creation has finished because this is a
 		// background operation.
 		err = syncDir(s.kv.opt.Dir)
+	}
+
+	if dryRun {
+		return newTi, func() error { return nil }, err
+	}
+
+	newTables := make([]*table.Table, len(newTi))
+	for i, t := range newTi {
+		newTables[i] = t.(*table.Table)
 	}
 
 	if err != nil {
@@ -844,6 +865,7 @@ type compactDef struct {
 	botRightIdx int
 
 	dropPrefixes [][]byte
+	newSize      int64
 }
 
 func (cd *compactDef) String() string {
@@ -1071,16 +1093,15 @@ func (s *levelsController) isCompacting(level int, tables ...*table.Table) bool 
 	return s.cstatus.overlapsWith(level, kr)
 }
 
-func (s *levelsController) runCompactDef(l int, cd *compactDef) (err error) {
-	timeStart := time.Now()
-
+func (s *levelsController) runCompactDef(l int, cd *compactDef, dryRun bool) (err error) {
 	thisLevel := cd.thisLevel
 	nextLevel := cd.nextLevel
 
 	// Table should never be moved directly between levels, always be rewritten to allow discarding
 	// invalid versions.
 
-	newTables, decr, err := s.compactBuildTables(l, cd)
+	timeStart := time.Now()
+	newData, decr, err := s.compactBuildTables(l, cd, dryRun)
 	if err != nil {
 		return err
 	}
@@ -1090,6 +1111,17 @@ func (s *levelsController) runCompactDef(l int, cd *compactDef) (err error) {
 			err = decErr
 		}
 	}()
+
+	s.kv.opt.Infof("LOG Compact %d->%d, compactBuildTables took %v", time.Since(timeStart))
+	if dryRun {
+		cd.newSize = 0
+		for _, t := range newData.([]table.TableInterface) {
+			cd.newSize += t.Size()
+		}
+		return nil
+	}
+
+	newTables := newData.([]*table.Table)
 	changeSet := buildChangeSet(cd, newTables)
 
 	// We write to the manifest _before_ we delete files (and after we created files)
@@ -1144,10 +1176,15 @@ func (s *levelsController) doCompact(id int, p *compactionPriority) error {
 	defer s.cstatus.delete(cd) // Remove the ranges from compaction status.
 
 	s.kv.opt.Infof("[Compactor: %d] Running compaction: %+v. def %s", id, p, cd.String())
-	if err := s.runCompactDef(l, cd); err != nil {
+	if err := s.runCompactDef(l, cd, p.dryRun); err != nil {
 		// This compaction couldn't be done successfully.
 		s.kv.opt.Warningf("[Compactor: %d] LOG Compact FAILED with error: %+v: %+v", id, err, cd)
 		return err
+	}
+
+	if p.dryRun {
+		p.botSize = cd.botSize
+		p.newBotSize = cd.newSize
 	}
 
 	s.kv.opt.Infof("[Compactor: %d] Compaction for level: %d DONE", id, cd.thisLevel.level)

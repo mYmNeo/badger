@@ -40,6 +40,7 @@ type tableMock struct {
 func (tm *tableMock) Smallest() []byte            { return tm.left }
 func (tm *tableMock) Biggest() []byte             { return tm.right }
 func (tm *tableMock) DoesNotHave(key []byte) bool { return false }
+func (tm *tableMock) Size() int64                 { return 0 }
 
 func TestPickTables(t *testing.T) {
 	opt := DefaultIteratorOptions
