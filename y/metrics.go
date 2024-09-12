@@ -48,6 +48,8 @@ var (
 	NumBlockedPuts *expvar.Int
 	// NumMemtableGets is number of memtable gets
 	NumMemtableGets *expvar.Int
+	// NumCompactions is number of compactions
+	NumCompactions *expvar.Int
 )
 
 // These variables are global and have cumulative values for all kv stores.
@@ -65,4 +67,5 @@ func init() {
 	LSMSize = expvar.NewMap("badger_lsm_size_bytes")
 	VlogSize = expvar.NewMap("badger_vlog_size_bytes")
 	PendingWrites = expvar.NewMap("badger_pending_writes_total")
+	NumCompactions = expvar.NewInt("badger_compactions_total")
 }

@@ -1112,7 +1112,7 @@ func (s *levelsController) runCompactDef(l int, cd *compactDef, dryRun bool) (er
 		}
 	}()
 
-	s.kv.opt.Infof("LOG Compact %d->%d, compactBuildTables took %v", time.Since(timeStart))
+	s.kv.opt.Infof("LOG Compact %d->%d, compactBuildTables took %v", thisLevel.level, nextLevel.level, time.Since(timeStart))
 	if dryRun {
 		cd.newSize = 0
 		for _, t := range newData.([]table.TableInterface) {
@@ -1121,6 +1121,7 @@ func (s *levelsController) runCompactDef(l int, cd *compactDef, dryRun bool) (er
 		return nil
 	}
 
+	y.NumCompactions.Add(1)
 	newTables := newData.([]*table.Table)
 	changeSet := buildChangeSet(cd, newTables)
 
@@ -1141,7 +1142,7 @@ func (s *levelsController) runCompactDef(l int, cd *compactDef, dryRun bool) (er
 	// Note: For level 0, while doCompact is running, it is possible that new tables are added.
 	// However, the tables are added only to the end, so it is ok to just delete the first table.
 
-	s.kv.opt.Infof("LOG Compact %d->%d, del %d tables, add %d tables, took %v\n",
+	s.kv.opt.Infof("LOG Compact %d->%d, del %d tables, add %d tables, took %v",
 		thisLevel.level, nextLevel.level, len(cd.top)+len(cd.bot),
 		len(newTables), time.Since(timeStart))
 	return nil
