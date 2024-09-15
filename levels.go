@@ -903,10 +903,14 @@ func (s *levelsController) fillTablesL0(cd *compactDef) bool {
 		return false
 	}
 
-	cd.top = make([]*table.Table, len(cd.thisLevel.tables))
-	copy(cd.top, cd.thisLevel.tables)
-	for _, t := range cd.top {
+	cd.top = make([]*table.Table, 0, len(cd.thisLevel.tables))
+	for _, t := range cd.thisLevel.tables {
 		cd.topSize += t.Size()
+		cd.top = append(cd.top, t)
+		// not pick all tables in L0, pick some tables in L0 which sum of sizes is less than maxCompactionExpandSize
+		if cd.topSize >= maxCompactionExpandSize {
+			break
+		}
 	}
 	cd.topRightIdx = len(cd.top)
 	cd.thisRange = infRange
