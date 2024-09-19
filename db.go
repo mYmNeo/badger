@@ -909,7 +909,9 @@ func (db *DB) writeLevel0Table(ft flushTask, f io.Writer) error {
 		}
 		b.Add(iter.Key(), iter.Value())
 	}
-	_, err := f.Write(b.Finish())
+	n, err := f.Write(b.Finish())
+	y.NumWrites.Add(1)
+	y.NumBytesWritten.Add(int64(n))
 	return err
 }
 
