@@ -34,6 +34,10 @@ type osFile struct {
 	*os.File
 }
 
+type FileLock func(fd int, how int) error
+
+var FileLocker FileLock
+
 // OpenFile is like os.OpenFile, but returns a locked file.
 // If flag includes os.O_WRONLY or os.O_RDWR, the file is write-locked;
 // otherwise, it is read-locked.

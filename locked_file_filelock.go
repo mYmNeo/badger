@@ -10,6 +10,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func init() {
+	FileLocker = unix.Flock
+}
+
 func openFile(name string, flag int, perm fs.FileMode) (*os.File, error) {
 	// On BSD systems, we could add the O_SHLOCK or O_EXLOCK flag to the OpenFile
 	// call instead of locking separately, but we have to support separate locking
@@ -23,9 +27,9 @@ func openFile(name string, flag int, perm fs.FileMode) (*os.File, error) {
 
 	switch flag & (os.O_RDONLY | os.O_WRONLY | os.O_RDWR) {
 	case os.O_WRONLY, os.O_RDWR:
-		err = unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+		err = FileLocker(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
 	default:
-		err = unix.Flock(int(f.Fd()), unix.LOCK_SH|unix.LOCK_NB)
+		err = FileLocker(int(f.Fd()), unix.LOCK_SH|unix.LOCK_NB)
 	}
 	if err != nil {
 		f.Close()
