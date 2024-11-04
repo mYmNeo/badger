@@ -250,7 +250,8 @@ func Open(opt Options) (db *DB, err error) {
 		return nil, ErrValueLogSize
 	}
 	if !(opt.ValueLogLoadingMode == options.FileIO ||
-		opt.ValueLogLoadingMode == options.MemoryMap) {
+		opt.ValueLogLoadingMode == options.MemoryMap ||
+		opt.ValueLogLoadingMode == options.MemoryMapWithPopulate) {
 		return nil, ErrInvalidLoadingMode
 	}
 	manifestFile, manifest, err := openOrCreateManifestFile(opt.Dir, opt.ReadOnly)

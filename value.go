@@ -72,11 +72,16 @@ type logFile struct {
 }
 
 func (lf *logFile) mmap(size int64, flags int) (err error) {
-	if lf.loadingMode != options.MemoryMap {
+	if lf.loadingMode != options.MemoryMap && lf.loadingMode != options.MemoryMapWithPopulate {
 		// Nothing to do
 		return nil
 	}
-	lf.fmap, err = y.Mmap(lf.fd, false, size, flags)
+
+	newFlags := flags
+	if lf.loadingMode == options.MemoryMapWithPopulate {
+		newFlags |= y.MapPopulateFlag
+	}
+	lf.fmap, err = y.Mmap(lf.fd, false, size, newFlags)
 	if err == nil {
 		err = y.Madvise(lf.fmap, false) // Disable readahead
 	}
@@ -84,7 +89,7 @@ func (lf *logFile) mmap(size int64, flags int) (err error) {
 }
 
 func (lf *logFile) munmap() (err error) {
-	if lf.loadingMode != options.MemoryMap || len(lf.fmap) == 0 {
+	if (lf.loadingMode != options.MemoryMap && lf.loadingMode != options.MemoryMapWithPopulate) || len(lf.fmap) == 0 {
 		// Nothing to do
 		return nil
 	}
