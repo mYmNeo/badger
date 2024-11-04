@@ -72,6 +72,7 @@ func OpenExistingFile(filename string, flags uint32) (*os.File, error) {
 	if flags&Sync != 0 {
 		openFlags |= datasyncFileFlag
 	}
+	openFlags |= os.O_APPEND
 	return os.OpenFile(filename, openFlags, 0)
 }
 
@@ -81,6 +82,7 @@ func CreateSyncedFile(filename string, sync bool) (*os.File, error) {
 	if sync {
 		flags |= datasyncFileFlag
 	}
+	flags |= os.O_APPEND
 	return os.OpenFile(filename, flags, 0600)
 }
 
@@ -90,6 +92,7 @@ func OpenSyncedFile(filename string, sync bool) (*os.File, error) {
 	if sync {
 		flags |= datasyncFileFlag
 	}
+	flags |= os.O_APPEND
 	return os.OpenFile(filename, flags, 0600)
 }
 
@@ -99,6 +102,7 @@ func OpenTruncFile(filename string, sync bool) (*os.File, error) {
 	if sync {
 		flags |= datasyncFileFlag
 	}
+	flags |= os.O_APPEND
 	return os.OpenFile(filename, flags, 0600)
 }
 

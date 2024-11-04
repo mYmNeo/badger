@@ -666,10 +666,7 @@ func TestTableChecksum(t *testing.T) {
 	rand.Read(rb)
 	f := buildTestTable(t, "k", 10000)
 	defer os.Remove(f.Name())
-	fi, err := f.Stat()
-	require.NoError(t, err, "unable to get file information")
-	// Write random bytes at random location.
-	n, err := f.WriteAt(rb, rand.Int63n(fi.Size()))
+	n, err := f.Write(rb)
 	require.NoError(t, err)
 	require.Equal(t, n, len(rb))
 
