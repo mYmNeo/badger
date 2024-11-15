@@ -19,6 +19,7 @@ package badger
 import (
 	"fmt"
 	"io/ioutil"
+	"math"
 	"math/rand"
 	"os"
 	"runtime"
@@ -99,6 +100,8 @@ func TestValueGCManaged(t *testing.T) {
 	opt := getTestOptions(dir)
 	opt.ValueLogMaxEntries = uint32(N / 10)
 	opt.managedTxns = true
+	opt.ValueThreshold = 1 << 10
+	opt.MaxTableSize = 1 << 15
 	db, err := Open(opt)
 	require.NoError(t, err)
 	defer db.Close()
@@ -139,6 +142,9 @@ func TestValueGCManaged(t *testing.T) {
 	for _, fi := range files {
 		t.Logf("File: %s. Size: %s\n", fi.Name(), humanize.Bytes(uint64(fi.Size())))
 	}
+
+	db.SetDiscardTs(math.MaxUint32)
+	require.NoError(t, db.Flatten(3))
 
 	for i := 0; i < 100; i++ {
 		// Try at max 100 times to GC even a single value log file.
@@ -458,7 +464,7 @@ func TestValueGC5(t *testing.T) {
 	require.True(t, ok)
 	lf := v.(*logFile)
 
-	require.NoError(t, kv.vlog.doRunGC(lf, 0.9))
+	require.NoError(t, kv.vlog.doRunGC(lf))
 
 	for i := 0; i < 45; i++ {
 		key := []byte(fmt.Sprintf("key%d", i))

@@ -595,6 +595,17 @@ nextTable:
 	// that would affect the snapshot view guarantee provided by transactions.
 	discardTs := s.kv.orc.discardAtOrBelow()
 
+	// Try to collect stats so that we can inform value log about GC. That would help us find which
+	// value log file should be GCed.
+	discardStats := make(map[uint32]int64)
+	updateStats := func(vs y.ValueStruct) {
+		if vs.Meta&bitValuePointer > 0 {
+			var vp valuePointer
+			vp.Decode(vs.Value)
+			discardStats[vp.Fid] += int64(vp.Len)
+		}
+	}
+
 	var newTi []table.TableInterface
 	mu := new(sync.Mutex) // Guards newTables
 	maxConcurrentBuild := 10
@@ -613,6 +624,7 @@ nextTable:
 		for ; it.Valid(); it.Next() {
 			// See if we need to skip the prefix.
 			if len(cd.dropPrefixes) > 0 && hasAnyPrefixes(it.Key(), cd.dropPrefixes) {
+				updateStats(it.Value())
 				numSkips++
 				continue
 			}
@@ -620,6 +632,7 @@ nextTable:
 			// See if we need to skip this key.
 			if len(skipKey) > 0 {
 				if y.SameKey(it.Key(), skipKey) {
+					updateStats(it.Value())
 					numSkips++
 					continue
 				} else {
@@ -675,6 +688,7 @@ nextTable:
 					default:
 						// If no overlap, we can skip all the versions, by continuing here.
 						numSkips++
+						updateStats(vs)
 						continue // Skip adding this key.
 					}
 				}
@@ -686,6 +700,7 @@ nextTable:
 					builder.Add(it.Key(), y.ValueStruct{Meta: bitDelete})
 					continue
 				case DecisionDrop:
+					updateStats(vs)
 					continue
 				case DecisionKeep:
 				}
@@ -764,6 +779,9 @@ nextTable:
 		return newTi, func() error { return nil }, err
 	}
 
+	s.kv.vlog.updateDiscardStats(discardStats)
+	s.kv.opt.Debugf("Discard stats: %v", discardStats)
+
 	newTables := make([]*table.Table, len(newTi))
 	for i, t := range newTi {
 		newTables[i] = t.(*table.Table)
@@ -819,19 +837,13 @@ func containsPrefix(table *table.Table, prefix []byte) bool {
 		// In table iterator's Seek, we assume that key has version in last 8 bytes. We set
 		// version=0 (ts=math.MaxUint64), so that we don't skip the key prefixed with prefix.
 		ti.Seek(y.KeyWithTs(prefix, math.MaxUint64))
-		if bytes.HasPrefix(ti.Key(), prefix) {
-			return true
-		}
-		return false
+		return bytes.HasPrefix(ti.Key(), prefix)
 	}
 	if bytes.Compare(prefix, smallValue) > 0 &&
 		bytes.Compare(prefix, largeValue) < 0 {
 		// There may be a case when table contains [0x0000,...., 0xffff]. If we are searching for
 		// k=0x0011, we should not directly infer that k is present. It may not be present.
-		if !isPresent() {
-			return false
-		}
-		return true
+		return isPresent()
 	}
 
 	return false
@@ -1211,8 +1223,6 @@ func (s *levelsController) addLevel0Table(t *table.Table) error {
 	for !s.levels[0].tryAddLevel0Table(t) {
 		// Stall. Make sure all levels are healthy before we unstall.
 		s.kv.opt.Infof("STALLED STALLED STALLED: %v\n", time.Since(lastUnstalled))
-		s.cstatus.RLock()
-		s.cstatus.RUnlock()
 		// Before we unstall, we need to make sure that level 0 and 1 are healthy. Otherwise, we
 		// will very quickly fill up level 0 again and if the compaction strategy favors level 0,
 		// then level 1 is going to super full.

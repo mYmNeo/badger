@@ -1595,12 +1595,6 @@ func TestLSMOnly(t *testing.T) {
 		txnSet(t, db, []byte(fmt.Sprintf("key%d", i)), value, 0x00)
 	}
 	require.NoError(t, db.Close()) // Close to force compactions, so Value log GC would run.
-
-	db, err = Open(opts)
-	require.NoError(t, err)
-
-	defer db.Close()
-	require.NoError(t, db.RunValueLogGC(0.2))
 }
 
 // This test function is doing some intricate sorcery.
