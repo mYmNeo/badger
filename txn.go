@@ -76,9 +76,10 @@ func newOracle(opt Options) *oracle {
 		//
 		// WaterMarks must be 64-bit aligned for atomic package, hence we must use pointers here.
 		// See https://golang.org/pkg/sync/atomic/#pkg-note-BUG.
-		readMark: &y.WaterMark{Name: "badger.PendingReads"},
-		txnMark:  &y.WaterMark{Name: "badger.TxnTimestamp"},
-		closer:   y.NewCloser(2),
+		readMark:     &y.WaterMark{Name: "badger.PendingReads"},
+		txnMark:      &y.WaterMark{Name: "badger.TxnTimestamp"},
+		closer:       y.NewCloser(2),
+		committedTxn: make([]committedTxn, 0, 1024),
 	}
 	orc.readMark.Init(orc.closer)
 	orc.txnMark.Init(orc.closer)
@@ -220,17 +221,17 @@ func (o *oracle) cleanupCommittedTransactions() { // Must be called under o.Lock
 	}
 	o.lastCleanupTs = maxReadTs
 
-	var i int
-	for i = 0; i < len(o.committedTxn); i++ {
-		if o.committedTxn[i].ts > maxReadTs {
-			break
+	tmp := o.committedTxn[:0]
+	for _, txn := range o.committedTxn {
+		if txn.ts <= maxReadTs {
+			for _, key := range txn.conflictKeys {
+				delete(o.commits, key)
+			}
+			continue
 		}
-
-		for _, key := range o.committedTxn[i].conflictKeys {
-			delete(o.commits, key)
-		}
+		tmp = append(tmp, txn)
 	}
-	o.committedTxn = o.committedTxn[i:]
+	o.committedTxn = tmp
 }
 
 func (o *oracle) doneCommit(cts uint64) {
