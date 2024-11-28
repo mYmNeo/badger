@@ -87,6 +87,10 @@ type Options struct {
 	// of true indicates that this key-value should be removed from the output of the compaction.
 	CompactionFilterFactory func() CompactionFilter
 
+	// MaxCompactionExpandSize defines the maximum size (in bytes) that a compaction can expand to.
+	// This is used to control the growth of the LSM tree during compaction operations.
+	MaxCompactionExpandSize int64
+
 	// Transaction start and commit timestamps are managed by end-user.
 	// This is only useful for databases built on top of Badger (like Dgraph).
 	// Not recommended for most users.
@@ -146,15 +150,16 @@ func DefaultOptions(path string) Options {
 		// -1 so 2*ValueLogFileSize won't overflow on 32-bit systems.
 		ValueLogFileSize: 1<<30 - 1,
 
-		ValueLogMaxEntries: 1000000,
-		ValueThreshold:     32,
-		Truncate:           false,
-		Logger:             defaultLogger,
-		EventLogging:       true,
-		LogRotatesToFlush:  2,
-		KVWriteCapacity:    1000,
-		ValueCompressLevel: 0,
-		NumMaxGCFile:       1,
+		ValueLogMaxEntries:      1000000,
+		ValueThreshold:          32,
+		Truncate:                false,
+		Logger:                  defaultLogger,
+		EventLogging:            true,
+		LogRotatesToFlush:       2,
+		KVWriteCapacity:         1000,
+		ValueCompressLevel:      0,
+		NumMaxGCFile:            1,
+		MaxCompactionExpandSize: 1 << 30, // 1GB
 	}
 }
 

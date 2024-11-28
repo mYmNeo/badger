@@ -1393,7 +1393,7 @@ func valueBytesToEntryForTest(decoder Decoder, buf []byte) (e Entry) {
 func (vlog *valueLog) pickLog(head valuePointer, discardRatio float64) (files []*logFile) {
 	fileMap := make(map[uint32]*logFile)
 	vlog.discardStats.Iterate(func(fid, discard uint64) {
-		if fid > uint64(head.Fid) || discard == 0 {
+		if fid >= uint64(head.Fid) {
 			return
 		}
 
@@ -1413,7 +1413,7 @@ func (vlog *valueLog) pickLog(head valuePointer, discardRatio float64) (files []
 			return
 		}
 
-		if discard == 1 || (discard > 0 && time.Since(fi.ModTime()).Hours() >= 1) {
+		if discard == 1 || time.Since(fi.ModTime()).Hours() >= 1 {
 			discard, _ = vlog.sampleDiscard(lf)
 		}
 

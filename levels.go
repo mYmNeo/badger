@@ -38,8 +38,9 @@ import (
 type levelsController struct {
 	nextFileID uint64 // Atomic
 	// The following are initialized once and const.
-	levels []*levelHandler
-	kv     *DB
+	levels                  []*levelHandler
+	kv                      *DB
+	maxCompactionExpandSize int64
 
 	cstatus compactStatus
 }
@@ -76,8 +77,9 @@ func revertToManifest(kv *DB, mf *Manifest, idMap map[uint64]struct{}) error {
 func newLevelsController(db *DB, mf *Manifest) (*levelsController, error) {
 	y.AssertTrue(db.opt.NumLevelZeroTablesStall > db.opt.NumLevelZeroTables)
 	s := &levelsController{
-		kv:     db,
-		levels: make([]*levelHandler, db.opt.MaxLevels),
+		kv:                      db,
+		levels:                  make([]*levelHandler, db.opt.MaxLevels),
+		maxCompactionExpandSize: db.opt.MaxCompactionExpandSize,
 	}
 	s.cstatus.levels = make([]*levelCompactStatus, db.opt.MaxLevels)
 
@@ -920,7 +922,7 @@ func (s *levelsController) fillTablesL0(cd *compactDef) bool {
 		cd.topSize += t.Size()
 		cd.top = append(cd.top, t)
 		// not pick all tables in L0, pick some tables in L0 which sum of sizes is less than maxCompactionExpandSize
-		if cd.topSize >= maxCompactionExpandSize {
+		if cd.topSize >= s.maxCompactionExpandSize {
 			break
 		}
 	}
@@ -970,8 +972,6 @@ func (s *levelsController) sortByOverlap(tables []*table.Table, cd *compactDef) 
 		return tableOverlap[i] < tableOverlap[j]
 	})
 }
-
-const maxCompactionExpandSize = 1 << 30 // 1GB
 
 func (s *levelsController) fillTables(cd *compactDef) bool {
 	cd.lockLevels()
@@ -1030,7 +1030,7 @@ func (s *levelsController) fillTables(cd *compactDef) bool {
 		newTopSize := t.Size() + cd.topSize
 		newBotSize := sumTableSize(next[left:cd.botLeftIdx]) + cd.botSize
 		newRatio := calcRatio(newTopSize, newBotSize)
-		if newRatio > candidateRatio && (newTopSize+newBotSize) < maxCompactionExpandSize {
+		if newRatio > candidateRatio && (newTopSize+newBotSize) < s.maxCompactionExpandSize {
 			cd.top = append([]*table.Table{t}, cd.top...)
 			cd.topLeftIdx--
 			bots = append(next[left:cd.botLeftIdx:cd.botLeftIdx], bots...)
@@ -1059,7 +1059,7 @@ func (s *levelsController) fillTables(cd *compactDef) bool {
 		newTopSize := t.Size() + cd.topSize
 		newBotSize := sumTableSize(next[cd.botRightIdx:right]) + cd.botSize
 		newRatio := calcRatio(newTopSize, newBotSize)
-		if newRatio > candidateRatio && (newTopSize+newBotSize) < maxCompactionExpandSize {
+		if newRatio > candidateRatio && (newTopSize+newBotSize) < s.maxCompactionExpandSize {
 			cd.top = append(cd.top, t)
 			cd.topRightIdx++
 			bots = append(bots, next[cd.botRightIdx:right]...)
