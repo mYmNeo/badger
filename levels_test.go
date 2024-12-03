@@ -839,7 +839,7 @@ func TestTableContainsPrefix(t *testing.T) {
 		return newTbl, errors.Wrapf(err, "Unable to open table: %q", fd.Name())
 	}
 	buildTable := func(keys []string) *table.Table {
-		filename := fmt.Sprintf("%s%s%d.sst", os.TempDir(), string(os.PathSeparator), rand.Uint32())
+		filename := fmt.Sprintf("%s%s%08x.sst", os.TempDir(), string(os.PathSeparator), rand.Uint32())
 		b := table.NewTableBuilder(1 << 20)
 		defer b.Close()
 

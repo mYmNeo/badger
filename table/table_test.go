@@ -53,7 +53,7 @@ func buildTable(t *testing.T, keyValues [][]string) *os.File {
 	defer b.Close()
 	// TODO: Add test for file garbage collection here. No files should be left after the tests here.
 
-	filename := fmt.Sprintf("%s%s%x.sst", os.TempDir(), string(os.PathSeparator), rand.Int63())
+	filename := fmt.Sprintf("%s%s%08x.sst", os.TempDir(), string(os.PathSeparator), rand.Int63())
 	f, err := y.CreateSyncedFile(filename, true)
 	if t != nil {
 		require.NoError(t, err)
@@ -722,7 +722,7 @@ func BenchmarkReadMerged(b *testing.B) {
 	tableSize := n / m
 	var tables []*Table
 	for i := 0; i < m; i++ {
-		filename := fmt.Sprintf("%s%s%d.sst", os.TempDir(), string(os.PathSeparator), rand.Int63())
+		filename := fmt.Sprintf("%s%s%08x.sst", os.TempDir(), string(os.PathSeparator), rand.Int63())
 		builder := NewTableBuilder(int64(tableSize))
 		f, err := y.OpenSyncedFile(filename, true)
 		y.Check(err)
@@ -788,7 +788,7 @@ func getTableForBenchmarks(b *testing.B, count int) *Table {
 	rand.Seed(time.Now().Unix())
 	builder := NewTableBuilder(1 << 20)
 	defer builder.Close()
-	filename := fmt.Sprintf("%s%s%d.sst", os.TempDir(), string(os.PathSeparator), rand.Int63())
+	filename := fmt.Sprintf("%s%s%08x.sst", os.TempDir(), string(os.PathSeparator), rand.Int63())
 	f, err := y.OpenSyncedFile(filename, true)
 	require.NoError(b, err)
 	for i := 0; i < count; i++ {

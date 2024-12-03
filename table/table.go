@@ -27,7 +27,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 
 	"github.com/AndreasBriese/bbloom"
@@ -54,8 +53,6 @@ type TableInterface interface {
 
 // Table represents a loaded table file with the info we have about it
 type Table struct {
-	sync.Mutex
-
 	fd        *os.File // Own fd.
 	tableSize int      // Initialized in OpenTable, using fd.Stat().
 
