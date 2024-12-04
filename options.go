@@ -82,6 +82,9 @@ type Options struct {
 	// NumMaxGCFile defines the maximum number of garbage collection files
 	NumMaxGCFile int
 
+	// NumMaxGCConcurrency defines the maximum number of concurrent garbage collection files
+	NumMaxGCConcurrency int
+
 	// The compaction process invokes this method for kv that is being compacted. A return value of false
 	// indicates that the kv should be preserved in the output of this compaction run and a return value
 	// of true indicates that this key-value should be removed from the output of the compaction.
@@ -159,6 +162,7 @@ func DefaultOptions(path string) Options {
 		KVWriteCapacity:         1000,
 		ValueCompressLevel:      0,
 		NumMaxGCFile:            1,
+		NumMaxGCConcurrency:     1,
 		MaxCompactionExpandSize: 1 << 30, // 1GB
 	}
 }

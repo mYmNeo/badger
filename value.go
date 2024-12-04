@@ -1523,6 +1523,8 @@ func (vlog *valueLog) runGC(discardRatio float64, head valuePointer) error {
 			return ErrNoRewrite
 		}
 		tried := make(map[uint32]bool)
+		inflight := y.NewThrottle(vlog.opt.NumMaxGCConcurrency)
+
 		for _, lf := range files {
 			if _, done := tried[lf.fid]; done {
 				continue
@@ -1533,14 +1535,21 @@ func (vlog *valueLog) runGC(discardRatio float64, head valuePointer) error {
 				break
 			}
 
-			vlog.opt.Logger.Infof("Running garbage collection on log: %s", lf.path)
-			err = vlog.doRunGC(lf)
-			if err != nil && err != ErrNoRewrite {
-				vlog.opt.Logger.Errorf("Error while doing GC on log: %s. Error: %v", lf.path, err)
-				break
-			}
+			func() {
+				inflight.Do()
+				vlog.opt.Logger.Infof("Running garbage collection on log: %s", lf.path)
+
+				err = vlog.doRunGC(lf)
+				if err != nil && err != ErrNoRewrite {
+					vlog.opt.Logger.Errorf("Error while doing GC on log: %s. Error: %v", lf.path, err)
+					inflight.Done(err)
+					return
+				}
+
+				inflight.Done(nil)
+			}()
 		}
-		return err
+		return inflight.Finish()
 	default:
 		return ErrRejected
 	}
