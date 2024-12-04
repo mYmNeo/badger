@@ -56,6 +56,10 @@ const (
 	bitCompression byte = 1 << 4 // Set if the value is compressed.
 )
 
+const (
+	fileSuffix = ".vlog"
+)
+
 type logFile struct {
 	path string
 	// This is a lock on the log file. It guards the fd’s value, the file’s
@@ -756,7 +760,7 @@ type valueLog struct {
 }
 
 func vlogFilePath(dirPath string, fid uint32) string {
-	return fmt.Sprintf("%s%s%06d.vlog", dirPath, string(os.PathSeparator), fid)
+	return fmt.Sprintf("%s%s%08x", dirPath, string(os.PathSeparator), fid) + fileSuffix
 }
 
 func (vlog *valueLog) fpath(fid uint32) string {
@@ -771,11 +775,10 @@ func (vlog *valueLog) populateFilesMap() error {
 
 	found := make(map[uint64]struct{})
 	for _, file := range files {
-		if !strings.HasSuffix(file.Name(), ".vlog") {
+		if !strings.HasSuffix(file.Name(), fileSuffix) {
 			continue
 		}
-		fsz := len(file.Name())
-		fid, err := strconv.ParseUint(file.Name()[:fsz-5], 10, 32)
+		fid, err := strconv.ParseUint(strings.TrimSuffix(file.Name(), fileSuffix), 16, 64)
 		if err != nil {
 			return errFile(err, file.Name(), "Unable to parse log id.")
 		}
