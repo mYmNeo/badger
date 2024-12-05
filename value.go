@@ -1393,7 +1393,7 @@ func valueBytesToEntryForTest(decoder Decoder, buf []byte) (e Entry) {
 	return
 }
 
-func (vlog *valueLog) pickLog(head valuePointer, discardRatio float64) (files []*logFile) {
+func (vlog *valueLog) pickLog(head valuePointer, discardRatio float64, maxFile int) (files []*logFile) {
 	fileMap := make(map[uint32]*logFile)
 	vlog.discardStats.Iterate(func(fid, discard uint64) {
 		if fid >= uint64(head.Fid) {
@@ -1416,46 +1416,50 @@ func (vlog *valueLog) pickLog(head valuePointer, discardRatio float64) (files []
 			return
 		}
 
-		if discard == 1 || time.Since(fi.ModTime()).Hours() >= 1 {
-			discard, _ = vlog.sampleDiscard(lf)
-		}
-
 		if thr := discardRatio * float64(fi.Size()); float64(discard) < thr {
 			vlog.opt.Debugf("Discard: %d less than threshold: %.0f for file: %s",
 				discard, thr, fi.Name())
 			return
 		}
 
-		fileMap[lf.fid] = lf
-	})
-
-	vlog.filesMap.Range(func(key, value any) bool {
-		lf := value.(*logFile)
-		if _, ok := fileMap[lf.fid]; ok {
-			return true
-		}
-
-		// We have a valid file.
-		fi, err := lf.fd.Stat()
-		if err != nil {
-			vlog.opt.Errorf("Unable to get stats for value log fid: %d err: %+v", fi, err)
-			return true
-		}
-
-		if time.Since(fi.ModTime()).Hours() < 1 {
-			return true
-		}
-
-		discard, _ := vlog.sampleDiscard(lf)
-		vlog.discardStats.Update(lf.fid, int64(discard))
-
-		if thr := discardRatio * float64(fi.Size()); float64(discard) < thr {
-			return true
+		if len(fileMap) >= maxFile {
+			return
 		}
 
 		fileMap[lf.fid] = lf
-		return true
 	})
+
+	if len(fileMap) < maxFile {
+		vlog.filesMap.Range(func(key, value any) bool {
+			lf := value.(*logFile)
+			if _, ok := fileMap[lf.fid]; ok {
+				return true
+			}
+
+			if lf.fid >= uint32(head.Fid) {
+				return true
+			}
+
+			// We have a valid file.
+			fi, err := lf.fd.Stat()
+			if err != nil {
+				vlog.opt.Errorf("Unable to get stats for value log fid: %d err: %+v", fi, err)
+				return true
+			}
+
+			discard, _ := vlog.sampleDiscard(lf)
+			if thr := discardRatio * float64(fi.Size()); float64(discard) < thr {
+				return true
+			}
+
+			if len(fileMap) >= maxFile {
+				return false
+			}
+
+			fileMap[lf.fid] = lf
+			return true
+		})
+	}
 
 	for _, lf := range fileMap {
 		files = append(files, lf)
@@ -1518,7 +1522,7 @@ func (vlog *valueLog) runGC(discardRatio float64, head valuePointer) error {
 		}()
 
 		var err error
-		files := vlog.pickLog(head, discardRatio)
+		files := vlog.pickLog(head, discardRatio, vlog.opt.NumMaxGCFile)
 		if len(files) == 0 {
 			return ErrNoRewrite
 		}
@@ -1531,23 +1535,19 @@ func (vlog *valueLog) runGC(discardRatio float64, head valuePointer) error {
 			}
 
 			tried[lf.fid] = true
-			if len(tried) > vlog.opt.NumMaxGCFile {
-				break
-			}
+			inflight.Do()
+			go func(vlgoFile *logFile) {
+				vlog.opt.Logger.Infof("Running garbage collection on log: %s", vlgoFile.path)
 
-			func() {
-				inflight.Do()
-				vlog.opt.Logger.Infof("Running garbage collection on log: %s", lf.path)
-
-				err = vlog.doRunGC(lf)
+				err = vlog.doRunGC(vlgoFile)
 				if err != nil && err != ErrNoRewrite {
-					vlog.opt.Logger.Errorf("Error while doing GC on log: %s. Error: %v", lf.path, err)
+					vlog.opt.Logger.Errorf("Error while doing GC on log: %s. Error: %v", vlgoFile.path, err)
 					inflight.Done(err)
 					return
 				}
 
 				inflight.Done(nil)
-			}()
+			}(lf)
 		}
 		return inflight.Finish()
 	default:
