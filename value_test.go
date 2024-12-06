@@ -182,16 +182,32 @@ func TestValueGC(t *testing.T) {
 		txnDelete(t, kv, []byte(fmt.Sprintf("key%d", i)))
 	}
 
+	// Find head on disk
+	headKey := y.KeyWithTs(head, math.MaxUint64)
+	// Need to pass with timestamp, lsm get removes the last 8 bytes and compares key
+	val, err := kv.lc.get(headKey, &y.ValueStruct{})
+	require.NoErrorf(t, err, "get head key")
+
+	var head valuePointer
+	if len(val.Value) > 0 {
+		head.Decode(val.Value)
+	}
+
 	v, ok := kv.vlog.filesMap.Load(kv.vlog.sortedFids()[0])
 	require.True(t, ok)
 	lf := v.(*logFile)
+
+	if lf.fid >= head.Fid {
+		t.Skipf("value log fid: %d is not less than head fid: %d", lf.fid, head.Fid)
+		return
+	}
 
 	//	lf.iterate(0, func(e Entry) bool {
 	//		e.print("lf")
 	//		return true
 	//	})
 
-	kv.vlog.rewrite(lf)
+	kv.vlog.rewrite(lf, nil)
 	for i := 45; i < 100; i++ {
 		key := []byte(fmt.Sprintf("key%d", i))
 
@@ -212,6 +228,7 @@ func TestValueGC2(t *testing.T) {
 	defer removeDir(dir)
 	opt := getTestOptions(dir)
 	opt.ValueLogFileSize = 1 << 20
+	opt.ValueThreshold = 1 << 10
 
 	kv, _ := Open(opt)
 	defer kv.Close()
@@ -238,16 +255,32 @@ func TestValueGC2(t *testing.T) {
 		txnSet(t, kv, []byte(fmt.Sprintf("key%d", i)), v, 0)
 	}
 
+	// Find head on disk
+	headKey := y.KeyWithTs(head, math.MaxUint64)
+	// Need to pass with timestamp, lsm get removes the last 8 bytes and compares key
+	val, err := kv.lc.get(headKey, &y.ValueStruct{})
+	require.NoErrorf(t, err, "get head key")
+
+	var head valuePointer
+	if len(val.Value) > 0 {
+		head.Decode(val.Value)
+	}
+
 	v, ok := kv.vlog.filesMap.Load(kv.vlog.sortedFids()[0])
 	require.True(t, ok)
 	lf := v.(*logFile)
+
+	if lf.fid >= head.Fid {
+		t.Skipf("value log fid: %d is not less than head fid: %d", lf.fid, head.Fid)
+		return
+	}
 
 	//	lf.iterate(0, func(e Entry) bool {
 	//		e.print("lf")
 	//		return true
 	//	})
 
-	kv.vlog.rewrite(lf)
+	kv.vlog.rewrite(lf, nil)
 	for i := 0; i < 5; i++ {
 		key := []byte(fmt.Sprintf("key%d", i))
 		require.NoError(t, kv.View(func(txn *Txn) error {
@@ -336,13 +369,29 @@ func TestValueGC3(t *testing.T) {
 	item = it.Item()
 	require.Equal(t, []byte("key002"), item.Key())
 
+	// Find head on disk
+	headKey := y.KeyWithTs(head, math.MaxUint64)
+	// Need to pass with timestamp, lsm get removes the last 8 bytes and compares key
+	val, err := kv.lc.get(headKey, &y.ValueStruct{})
+	require.NoErrorf(t, err, "get head key")
+
+	var head valuePointer
+	if len(val.Value) > 0 {
+		head.Decode(val.Value)
+	}
+
 	// Like other tests, we pull out a logFile to rewrite it directly
 
 	v, ok := kv.vlog.filesMap.Load(kv.vlog.sortedFids()[0])
 	require.True(t, ok)
 	logFile := v.(*logFile)
 
-	kv.vlog.rewrite(logFile)
+	if logFile.fid >= head.Fid {
+		t.Skipf("value log fid: %d is not less than head fid: %d", logFile.fid, head.Fid)
+		return
+	}
+
+	kv.vlog.rewrite(logFile, nil)
 	it.Next()
 	require.True(t, it.Valid())
 	item = it.Item()
@@ -386,20 +435,42 @@ func TestValueGC4(t *testing.T) {
 		txnSet(t, kv, []byte(fmt.Sprintf("key%d", i)), v, 0)
 	}
 
+	// Find head on disk
+	headKey := y.KeyWithTs(head, math.MaxUint64)
+	// Need to pass with timestamp, lsm get removes the last 8 bytes and compares key
+	val, err := kv.lc.get(headKey, &y.ValueStruct{})
+	require.NoErrorf(t, err, "get head key")
+
+	var head valuePointer
+	if len(val.Value) > 0 {
+		head.Decode(val.Value)
+	}
+
 	v, ok := kv.vlog.filesMap.Load(kv.vlog.sortedFids()[0])
 	require.True(t, ok)
 	lf0 := v.(*logFile)
+
+	if lf0.fid >= head.Fid {
+		t.Skipf("value log fid: %d is not less than head fid: %d", lf0.fid, head.Fid)
+		return
+	}
+
 	v, ok = kv.vlog.filesMap.Load(kv.vlog.sortedFids()[1])
 	require.True(t, ok)
 	lf1 := v.(*logFile)
+
+	if lf1.fid >= head.Fid {
+		t.Skipf("value log fid: %d is not less than head fid: %d", lf1.fid, head.Fid)
+		return
+	}
 
 	//	lf.iterate(0, func(e Entry) bool {
 	//		e.print("lf")
 	//		return true
 	//	})
 
-	kv.vlog.rewrite(lf0)
-	kv.vlog.rewrite(lf1)
+	kv.vlog.rewrite(lf0, nil)
+	kv.vlog.rewrite(lf1, nil)
 
 	require.NoError(t, kv.Close())
 
@@ -464,7 +535,7 @@ func TestValueGC5(t *testing.T) {
 	require.True(t, ok)
 	lf := v.(*logFile)
 
-	require.NoError(t, kv.vlog.doRunGC(lf))
+	require.NoError(t, kv.vlog.doRunGC(lf, nil))
 
 	for i := 0; i < 45; i++ {
 		key := []byte(fmt.Sprintf("key%d", i))

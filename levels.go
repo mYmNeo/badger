@@ -1276,6 +1276,31 @@ func (s *levelsController) get(key []byte, maxVs *y.ValueStruct) (y.ValueStruct,
 	return y.ValueStruct{}, nil
 }
 
+func (s *levelsController) getSnapshot() (*SnapshotLevels, error) {
+	if s.kv.IsClosed() {
+		return nil, ErrDBClosed
+	}
+
+	levels := make([]*levelHandler, 0, len(s.levels))
+	for _, l := range s.levels {
+		l.Lock()
+		tables := make([]*table.Table, len(l.tables))
+		for i := range l.tables {
+			l.tables[i].IncrRef()
+			tables[i] = l.tables[i]
+		}
+		l.Unlock()
+
+		levels = append(levels, &levelHandler{
+			tables: tables,
+		})
+	}
+
+	return &SnapshotLevels{
+		levels: levels,
+	}, nil
+}
+
 func appendIteratorsReversed(out []y.Iterator, th []*table.Table, reversed bool) []y.Iterator {
 	for i := len(th) - 1; i >= 0; i-- {
 		// This will increment the reference of the table handler.

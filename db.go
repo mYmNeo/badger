@@ -366,7 +366,7 @@ func Open(opt Options) (db *DB, err error) {
 						version = y.ParseTs(rawKey)
 
 						var maxVs y.ValueStruct
-						_, err := db.lc.get(y.KeyWithTs(key, math.MaxUint64), &maxVs, 0)
+						_, err := db.lc.get(y.KeyWithTs(key, math.MaxUint64), &maxVs)
 						// if we can't find the latest version of the key in LSM, just deleted it
 						if err == nil {
 							// latest version of key exists, and version is newer than searched key, skip it
@@ -610,6 +610,13 @@ func (db *DB) get(key []byte) (y.ValueStruct, error) {
 		}
 	}
 	return db.lc.get(key, &maxVs)
+}
+
+func (db *DB) getSnapshot() (*SnapshotLevels, error) {
+	if db.IsClosed() {
+		return nil, ErrDBClosed
+	}
+	return db.lc.getSnapshot()
 }
 
 // updateHead should not be called without the db.Lock() since db.vhead is used

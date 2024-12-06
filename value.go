@@ -25,7 +25,6 @@ import (
 	"io"
 	"io/ioutil"
 	"math"
-	"math/rand"
 	"os"
 	"sort"
 	"strconv"
@@ -390,7 +389,7 @@ func (vlog *valueLog) removeValueLog(f *logFile) error {
 	return nil
 }
 
-func (vlog *valueLog) sampleDiscard(lf *logFile) (discard uint64, err error) {
+func (vlog *valueLog) sampleDiscard(lf *logFile, snapshot *SnapshotLevels) (discard uint64, err error) {
 	type reason struct {
 		total   uint32
 		discard uint32
@@ -402,44 +401,33 @@ func (vlog *valueLog) sampleDiscard(lf *logFile) (discard uint64, err error) {
 		return 0, err
 	}
 
-	// Set up the sampling window sizes.
-	sizeWindow := int64(float64(fi.Size()) * 0.1) // 10% of the file as window.
-	// Pick a random start point for the log.
-	skipFirst := rand.Int63n(fi.Size())                             // Pick a random starting location.
-	countWindow := int(float64(vlog.opt.ValueLogMaxEntries) * 0.01) // 1% of num entries.
-
 	y.AssertTrue(vlog.db != nil)
 	s := new(y.Slice)
 
 	var r reason
 	var numIterations int
-	var skipped int64
-	start := time.Now()
+
+	// When value log is under garbage collection, we need to check if the key is present in the LSM tree.
+	// There is a search optimization in the LSM tree, because the keys in the ongoing garbage collection
+	// are all in the persistent tables. We can take a snapshot of that table and check if the key is present in
+	// that snapshot.
+	if snapshot == nil {
+		freshSnapshot, err := vlog.db.getSnapshot()
+		if err != nil {
+			return 0, err
+		}
+		defer freshSnapshot.Close()
+		snapshot = freshSnapshot
+	}
 
 	_, err = vlog.iterate(lf, 0, func(e Entry, vp valuePointer) error {
 		numIterations++
 		esz := vp.Len
 
-		if skipped < skipFirst {
-			skipped += int64(esz)
-			return nil
-		}
-
-		// Sample until we reach the window sizes or exceed 10 seconds.
-		if r.count > countWindow {
-			return errStop
-		}
-		if int64(r.total) > sizeWindow {
-			return errStop
-		}
-		if time.Since(start) > 10*time.Second {
-			return errStop
-		}
-
 		r.total += esz
 		r.count++
 
-		vs, ierr := vlog.db.get(e.Key)
+		vs, ierr := snapshot.get(e.Key)
 		if ierr != nil {
 			return ierr
 		}
@@ -495,16 +483,36 @@ func (vlog *valueLog) sampleDiscard(lf *logFile) (discard uint64, err error) {
 	return uint64(magnifiedDiscard), nil
 }
 
-func (vlog *valueLog) rewrite(f *logFile) error {
+func (vlog *valueLog) rewrite(f *logFile, snapshot *SnapshotLevels) error {
+	if _, ok := vlog.filesToBeDeleted.Load(f.fid); ok {
+		return errors.Errorf("value log file already marked for deletion fid: %d", f.fid)
+	}
+
 	maxFid := atomic.LoadUint32(&vlog.maxFid)
 	y.AssertTruef(f.fid < maxFid, "fid to move: %d. Current max fid: %d", f.fid, maxFid)
 
 	wb := make([]*Entry, 0, 1000)
-	var size int64
+	var (
+		size        int64
+		rewriteSize int64
+	)
 
 	y.AssertTrue(vlog.db != nil)
+	// When value log is under garbage collection, we need to check if the key is present in the LSM tree.
+	// There is a search optimization in the LSM tree, because the keys in the ongoing garbage collection
+	// are all in the persistent tables. We can take a snapshot of that table and check if the key is present in
+	// that snapshot.
+	if snapshot == nil {
+		freshSnapshot, err := vlog.db.getSnapshot()
+		if err != nil {
+			return err
+		}
+		defer freshSnapshot.Close()
+		snapshot = freshSnapshot
+	}
+
 	fe := func(e Entry) error {
-		vs, err := vlog.db.get(e.Key)
+		vs, err := snapshot.get(e.Key)
 		if err != nil {
 			return err
 		}
@@ -533,6 +541,7 @@ func (vlog *valueLog) rewrite(f *logFile) error {
 		// NOTE: It might be possible that the entry read from the LSM Tree points to
 		// an older vlog file. See the comments in the else part.
 		if vp.Fid == f.fid && vp.Offset == e.offset {
+			rewriteSize += int64(vp.Len)
 			// This new entry only contains the key, and a pointer to the value.
 			ne := new(Entry)
 			// Remove only the bitValuePointer and transaction markers. We
@@ -643,6 +652,7 @@ func (vlog *valueLog) rewrite(f *logFile) error {
 		}
 		i += batchSize
 	}
+	vlog.db.opt.Logger.Infof("Rewrite ratio: %.2f%%", float64(rewriteSize)/float64(f.size)*100)
 	return vlog.removeValueLog(f)
 }
 
@@ -1409,6 +1419,11 @@ func (vlog *valueLog) pickLog(head valuePointer, discardRatio float64, maxFile i
 		}
 
 		lf := matched.(*logFile)
+		// skip if the file is being deleted.
+		if _, ok := vlog.filesToBeDeleted.Load(lf.fid); ok {
+			return
+		}
+
 		// We have a valid file.
 		fi, err := lf.fd.Stat()
 		if err != nil {
@@ -1422,43 +1437,72 @@ func (vlog *valueLog) pickLog(head valuePointer, discardRatio float64, maxFile i
 			return
 		}
 
-		if len(fileMap) >= maxFile {
-			return
-		}
-
 		fileMap[lf.fid] = lf
 	})
 
 	if len(fileMap) < maxFile {
-		vlog.filesMap.Range(func(key, value any) bool {
-			lf := value.(*logFile)
-			if _, ok := fileMap[lf.fid]; ok {
+		snapshot, err := vlog.db.getSnapshot()
+		if err == nil {
+			defer snapshot.Close()
+
+			pendingPick := make([]*logFile, 0, maxFile)
+			vlog.filesMap.Range(func(key, value any) bool {
+				lf := value.(*logFile)
+				if _, ok := fileMap[lf.fid]; ok {
+					return true
+				}
+
+				// skip if the file is being deleted.
+				if _, ok := vlog.filesToBeDeleted.Load(lf.fid); ok {
+					return true
+				}
+
+				if lf.fid >= uint32(head.Fid) {
+					return true
+				}
+
+				pendingPick = append(pendingPick, lf)
 				return true
-			}
+			})
 
-			if lf.fid >= uint32(head.Fid) {
-				return true
-			}
+			sort.Slice(pendingPick, func(i, j int) bool {
+				return pendingPick[i].fid < pendingPick[j].fid
+			})
 
-			// We have a valid file.
-			fi, err := lf.fd.Stat()
-			if err != nil {
-				vlog.opt.Errorf("Unable to get stats for value log fid: %d err: %+v", fi, err)
-				return true
-			}
+			inflight := y.NewThrottle(vlog.opt.NumMaxGCConcurrency)
+			fileLock := sync.RWMutex{}
+			for _, lf := range pendingPick {
+				fileLock.RLock()
+				candicateSize := len(fileMap)
+				fileLock.RUnlock()
 
-			discard, _ := vlog.sampleDiscard(lf)
-			if thr := discardRatio * float64(fi.Size()); float64(discard) < thr {
-				return true
-			}
+				if candicateSize >= maxFile {
+					break
+				}
 
-			if len(fileMap) >= maxFile {
-				return false
-			}
+				// We have a valid file.
+				fi, err := lf.fd.Stat()
+				if err != nil {
+					vlog.opt.Errorf("Unable to get stats for value log fid: %d err: %+v", fi, err)
+					continue
+				}
 
-			fileMap[lf.fid] = lf
-			return true
-		})
+				inflight.Do()
+				go func(vlogFile *logFile, fSize int64) {
+					defer inflight.Done(nil)
+
+					discard, _ := vlog.sampleDiscard(vlogFile, snapshot)
+					if thr := discardRatio * float64(fSize); float64(discard) < thr {
+						return
+					}
+
+					fileLock.Lock()
+					fileMap[lf.fid] = lf
+					fileLock.Unlock()
+				}(lf, fi.Size())
+			}
+			inflight.Finish()
+		}
 	}
 
 	for _, lf := range fileMap {
@@ -1495,8 +1539,8 @@ func discardEntry(e Entry, vs y.ValueStruct, db *DB) bool {
 	return false
 }
 
-func (vlog *valueLog) doRunGC(lf *logFile) (err error) {
-	if err := vlog.rewrite(lf); err != nil {
+func (vlog *valueLog) doRunGC(lf *logFile, snapshot *SnapshotLevels) (err error) {
+	if err := vlog.rewrite(lf, snapshot); err != nil {
 		return err
 	}
 	// Remove the file from discardStats.
@@ -1529,19 +1573,29 @@ func (vlog *valueLog) runGC(discardRatio float64, head valuePointer) error {
 		tried := make(map[uint32]bool)
 		inflight := y.NewThrottle(vlog.opt.NumMaxGCConcurrency)
 
+		snapshot, err := vlog.db.getSnapshot()
+		if err != nil {
+			return err
+		}
+		defer snapshot.Close()
+
 		for _, lf := range files {
 			if _, done := tried[lf.fid]; done {
 				continue
 			}
 
+			if _, ok := vlog.filesToBeDeleted.Load(lf.fid); ok {
+				continue
+			}
+
 			tried[lf.fid] = true
 			inflight.Do()
-			go func(vlgoFile *logFile) {
-				vlog.opt.Logger.Infof("Running garbage collection on log: %s", vlgoFile.path)
+			go func(vlogFile *logFile) {
+				vlog.opt.Logger.Infof("Running garbage collection on log: %s", vlogFile.path)
 
-				err = vlog.doRunGC(vlgoFile)
+				err = vlog.doRunGC(vlogFile, snapshot)
 				if err != nil && err != ErrNoRewrite {
-					vlog.opt.Logger.Errorf("Error while doing GC on log: %s. Error: %v", vlgoFile.path, err)
+					vlog.opt.Logger.Errorf("Error while doing GC on log: %s. Error: %v", vlogFile.path, err)
 					inflight.Done(err)
 					return
 				}
