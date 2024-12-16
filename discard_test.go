@@ -30,13 +30,13 @@ func TestDiscardStats(t *testing.T) {
 	ds, err := InitDiscardStats(opt)
 	require.NoError(t, err)
 	for i := uint32(0); i < 20; i++ {
-		require.Equal(t, int64(i*100), ds.Update(i, int64(i*100)))
+		require.Equal(t, int64(i*100), ds.Update(i, int64(i*100), false))
 	}
 	ds.Iterate(func(id, val uint64) {
 		require.Equal(t, id*100, val)
 	})
 	for i := uint32(0); i < 10; i++ {
-		require.Equal(t, 0, int(ds.Update(i, -1)))
+		require.Equal(t, 0, int(ds.Update(i, -1, false)))
 	}
 	ds.Iterate(func(id, val uint64) {
 		if id < 10 {
@@ -44,5 +44,12 @@ func TestDiscardStats(t *testing.T) {
 			return
 		}
 		require.Equal(t, int(id*100), int(val))
+	})
+
+	for i := uint32(0); i < 20; i++ {
+		require.Equal(t, 100, ds.Update(i, int64(100), true))
+	}
+	ds.Iterate(func(id, val uint64) {
+		require.Equal(t, 100, 100)
 	})
 }

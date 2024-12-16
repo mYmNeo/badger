@@ -396,11 +396,6 @@ func (vlog *valueLog) sampleDiscard(lf *logFile, snapshot *SnapshotLevels) (disc
 		count   int
 	}
 
-	fi, err := lf.fd.Stat()
-	if err != nil {
-		return 0, err
-	}
-
 	y.AssertTrue(vlog.db != nil)
 	s := new(y.Slice)
 
@@ -477,10 +472,8 @@ func (vlog *valueLog) sampleDiscard(lf *logFile, snapshot *SnapshotLevels) (disc
 		return 0, err
 	}
 
-	magnifiedDiscard := float64(r.discard) / float64(r.total) * float64(fi.Size())
-	vlog.discardStats.Update(lf.fid, int64(magnifiedDiscard))
-
-	return uint64(magnifiedDiscard), nil
+	vlog.discardStats.Update(lf.fid, int64(r.discard), true)
+	return uint64(r.discard), nil
 }
 
 func (vlog *valueLog) rewrite(f *logFile, snapshot *SnapshotLevels) error {
@@ -696,7 +689,7 @@ func (vlog *valueLog) deleteLogFileWithCleanup(lf *logFile) error {
 	defer lf.lock.Unlock()
 
 	// Delete fid from discard stats as well.
-	vlog.discardStats.Update(lf.fid, -1)
+	vlog.discardStats.Update(lf.fid, -1, false)
 
 	path := vlog.fpath(lf.fid)
 	unix.Madvise(lf.fmap, unix.MADV_DONTNEED)
@@ -949,10 +942,6 @@ func (vlog *valueLog) open(db *DB, ptr valuePointer, replayFn logEntry) error {
 		// truncated. We might need to truncate files during a replay.
 		if err := lf.open(vlog.fpath(fid), flags); err != nil {
 			return err
-		}
-
-		if !vlog.discardStats.HasEntry(lf.fid) {
-			vlog.discardStats.Update(lf.fid, 1)
 		}
 
 		// This file is before the value head pointer. So, we don't need to
@@ -1414,7 +1403,7 @@ func (vlog *valueLog) pickLog(head valuePointer, discardRatio float64, maxFile i
 		// This file was deleted but it's discard stats increased because of compactions. The file
 		// doesn't exist so we don't need to do anything. Skip it and retry.
 		if !ok {
-			vlog.discardStats.Update(uint32(fid), -1)
+			vlog.discardStats.Update(uint32(fid), -1, false)
 			return
 		}
 
@@ -1514,7 +1503,7 @@ func (vlog *valueLog) pickLog(head valuePointer, discardRatio float64, maxFile i
 
 func (vlog *valueLog) updateDiscardStats(stats map[uint32]int64) {
 	for fid, discard := range stats {
-		vlog.discardStats.Update(fid, discard)
+		vlog.discardStats.Update(fid, discard, false)
 	}
 }
 
@@ -1544,7 +1533,7 @@ func (vlog *valueLog) doRunGC(lf *logFile, snapshot *SnapshotLevels) (err error)
 		return err
 	}
 	// Remove the file from discardStats.
-	vlog.discardStats.Update(lf.fid, -1)
+	vlog.discardStats.Update(lf.fid, -1, false)
 	return nil
 }
 
@@ -1571,7 +1560,8 @@ func (vlog *valueLog) runGC(discardRatio float64, head valuePointer) error {
 			return ErrNoRewrite
 		}
 		tried := make(map[uint32]bool)
-		inflight := y.NewThrottle(vlog.opt.NumMaxGCConcurrency)
+		threads := vlog.opt.NumMaxGCConcurrency/2 + 1
+		inflight := y.NewThrottle(threads)
 
 		snapshot, err := vlog.db.getSnapshot()
 		if err != nil {

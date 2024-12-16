@@ -114,7 +114,7 @@ func (lf *discardStats) HasEntry(fidu uint32) bool {
 // Update would update the discard stats for the given file id. If discard is
 // 0, it would return the current value of discard for the file. If discard is
 // < 0, it would set the current value of discard to zero for the file.
-func (lf *discardStats) Update(fidu uint32, discard int64) int64 {
+func (lf *discardStats) Update(fidu uint32, discard int64, override bool) int64 {
 	fid := uint64(fidu)
 	lf.Lock()
 	defer lf.Unlock()
@@ -131,6 +131,10 @@ func (lf *discardStats) Update(fidu uint32, discard int64) int64 {
 		if discard < 0 {
 			lf.set(off, 0)
 			return 0
+		}
+
+		if override {
+			curDisc = 0
 		}
 		lf.set(off, curDisc+uint64(discard))
 		return int64(curDisc + uint64(discard))
