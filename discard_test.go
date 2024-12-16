@@ -47,9 +47,9 @@ func TestDiscardStats(t *testing.T) {
 	})
 
 	for i := uint32(0); i < 20; i++ {
-		require.Equal(t, 100, ds.Update(i, int64(100), true))
+		require.Equal(t, int64(100), ds.Update(i, int64(100), true))
 	}
 	ds.Iterate(func(id, val uint64) {
-		require.Equal(t, 100, 100)
+		require.Equal(t, int64(100), int64(val))
 	})
 }

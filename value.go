@@ -366,21 +366,22 @@ func (vlog *valueLog) iterate(lf *logFile, offset uint32, fn logEntry) (uint32, 
 	return validEndOffset, nil
 }
 
-func (vlog *valueLog) removeValueLog(f *logFile) error {
-	var deleteFileNow bool
+func (vlog *valueLog) removeValueLog(f *logFile, forceDelete bool) error {
+	deleteFileNow := forceDelete
 	// Entries written to LSM. Remove the older file now.
 	if _, ok := vlog.filesMap.Load(f.fid); !ok {
 		return errors.Errorf("Unable to find fid: %d", f.fid)
 	}
+
 	if vlog.iteratorCount() == 0 {
-		vlog.filesMap.Delete(f.fid)
 		deleteFileNow = true
 	} else {
 		vlog.filesToBeDeleted.Store(f.fid, struct{}{})
 	}
 
 	if deleteFileNow {
-		vlog.opt.Logger.Infof("Removing file %s", f.path)
+		vlog.filesMap.Delete(f.fid)
+		vlog.opt.Logger.Infof("Removing file %s, force %v", f.path, forceDelete)
 		if err := vlog.deleteLogFileWithCleanup(f); err != nil {
 			return err
 		}
@@ -472,7 +473,9 @@ func (vlog *valueLog) sampleDiscard(lf *logFile, snapshot *SnapshotLevels) (disc
 		return 0, err
 	}
 
-	vlog.discardStats.Update(lf.fid, int64(r.discard), true)
+	if r.discard > 0 {
+		vlog.discardStats.Update(lf.fid, int64(r.discard), true)
+	}
 	return uint64(r.discard), nil
 }
 
@@ -645,8 +648,8 @@ func (vlog *valueLog) rewrite(f *logFile, snapshot *SnapshotLevels) error {
 		}
 		i += batchSize
 	}
-	vlog.db.opt.Logger.Infof("Rewrite ratio: %.2f%%", float64(rewriteSize)/float64(f.size)*100)
-	return vlog.removeValueLog(f)
+	vlog.db.opt.Logger.Infof("Rewrite ratio: %.2f%% for %s", float64(rewriteSize)/float64(f.size)*100, f.path)
+	return vlog.removeValueLog(f, rewriteSize == 0)
 }
 
 func (vlog *valueLog) incrIteratorCount() {
@@ -675,7 +678,7 @@ func (vlog *valueLog) decrIteratorCount() error {
 
 	for _, lf := range lfs {
 		if err := vlog.deleteLogFileWithCleanup(lf); err != nil {
-			return err
+			vlog.opt.Logger.Errorf("Error while deleting log file: %s. Error: %v", lf.path, err)
 		}
 	}
 	return nil
