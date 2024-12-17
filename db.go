@@ -1066,7 +1066,7 @@ func (db *DB) calculateSize() {
 func (db *DB) updateSize(lc *y.Closer) {
 	defer lc.Done()
 
-	metricsTicker := time.NewTicker(time.Minute)
+	metricsTicker := time.NewTicker(time.Second * 10)
 	defer metricsTicker.Stop()
 
 	for {
